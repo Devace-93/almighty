@@ -191,6 +191,7 @@ impl Store {
         conn.execute_batch(crate::triage::SCHEMA)?;
         conn.execute_batch(crate::service::SCHEMA)?;
         conn.execute_batch(crate::push::SCHEMA)?;
+        conn.execute_batch(crate::planner::SCHEMA)?;
         // Terminal sessions do not survive a restart, so neither do their tokens.
         conn.execute("DELETE FROM tokens WHERE kind = 'agent'", [])?;
         Ok(Store { conn: Mutex::new(conn), secret_key })

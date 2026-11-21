@@ -225,7 +225,8 @@ Summary; the contract is [`PLUGINS.md`](PLUGINS.md).
    UnifiedPush endpoints, multi-workspace switcher.
 8. **OIDC**, team roles, install skills for company deployments (done, see docs/m8.md; tested against a
    stand-in provider, not a real one).
-9. **Planner + awareness digests**; ACP adapter for other agent runtimes.
+9. **Planner + awareness digests**; ACP adapter for other agent runtimes (done, see docs/m9.md; the adapter
+   was only run against a stand-in agent).
 
 ## Quick start
 
@@ -252,7 +253,8 @@ First plugin (needs `rustup target add wasm32-wasip2`):
 # then list repositories in <data dir>/workspace.toml, see plugins/github/README.md
 ```
 
-Notes: [`docs/m8.md`](docs/m8.md) (sign-in through an identity provider, roles, install skills),
+Notes: [`docs/m9.md`](docs/m9.md) (planner, digest, ACP adapter),
+[`docs/m8.md`](docs/m8.md) (sign-in through an identity provider, roles, install skills),
 [`docs/m7.md`](docs/m7.md) (phone layout, push),
 [`docs/m6.md`](docs/m6.md) (service plugins),
 [`docs/m5.md`](docs/m5.md) (review, explainer, inline images),

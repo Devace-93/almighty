@@ -1,5 +1,6 @@
 //! `almighty`: server launcher, terminal client and agent control CLI.
 
+mod acp;
 mod attach;
 mod creds;
 mod mcp;
@@ -124,6 +125,22 @@ enum Cmd {
         #[command(subcommand)]
         cmd: PushCmd,
     },
+    /// Your plan: tasks and events to prepare for.
+    Plan {
+        #[command(subcommand)]
+        cmd: Option<PlanCmd>,
+        /// Also show what is done.
+        #[arg(long)]
+        done: bool,
+    },
+    /// What happened that needs nothing from you, grouped by source.
+    Digest {
+        #[arg(long, default_value_t = 24)]
+        hours: u64,
+        /// Have the server's model write it out.
+        #[arg(long)]
+        written: bool,
+    },
     /// List items that connectors brought in.
     Items {
         #[arg(long)]
@@ -136,6 +153,37 @@ enum Cmd {
     Hook,
     /// MCP server over stdio exposing the terminal control tools.
     Mcp,
+    /// Talk to an agent that speaks the Agent Client Protocol (ACP) from this terminal.
+    Acp {
+        /// Send one prompt and end, instead of reading prompts from the terminal.
+        #[arg(long)]
+        prompt: Option<String>,
+        /// What to do when the agent asks for permission.
+        #[arg(long, value_enum, default_value = "ask")]
+        permissions: acp::Policy,
+        /// The agent's command, e.g. `-- my-agent --acp`.
+        #[arg(trailing_var_arg = true, required = true)]
+        command: Vec<String>,
+    },
+    #[command(hide = true)]
+    AcpEchoAgent,
+}
+
+#[derive(Subcommand)]
+enum PlanCmd {
+    /// Add a task, optionally due in some days.
+    Add {
+        title: String,
+        #[arg(long)]
+        in_days: Option<f64>,
+    },
+    /// Mark a task as done (or open again with --undo).
+    Done {
+        id: i64,
+        #[arg(long)]
+        undo: bool,
+    },
+    Rm { id: i64 },
 }
 
 #[derive(Subcommand)]
@@ -524,7 +572,49 @@ async fn main() -> Result<()> {
             }
         }
         Cmd::Mcp => mcp::serve(client).await?,
+        Cmd::Acp { prompt, permissions, command } => acp::run(client, command, prompt, permissions).await?,
+        Cmd::AcpEchoAgent => acp::echo_agent().await?,
         Cmd::Plugin { cmd } => plugin::run(&client, cmd).await?,
+        Cmd::Plan { cmd: None, done } => {
+            let v = client.get(if done { "/api/planner?done=1" } else { "/api/planner" }).await?;
+            for e in v["entries"].as_array().into_iter().flatten() {
+                let id = match e["kind"].as_str() {
+                    Some("task") => e["task"]["id"].to_string(),
+                    _ => e["item"]["id"].as_str().unwrap_or("").to_string(),
+                };
+                println!("{}\t{}\t{}", e["when"].as_str().unwrap_or(""), id, e["title"].as_str().unwrap_or(""));
+            }
+        }
+        Cmd::Plan { cmd: Some(cmd), .. } => match cmd {
+            PlanCmd::Add { title, in_days } => {
+                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
+                let due = in_days.map(|d| now + (d.max(0.0) * 86400.0) as u64);
+                let v = client.post("/api/planner", json!({ "title": title, "due": due })).await?;
+                println!("Task {} added", v["task"]["id"]);
+            }
+            PlanCmd::Done { id, undo } => {
+                client.post(&format!("/api/planner/{id}"), json!({ "done": !undo })).await?;
+                println!("Task {id} {}", if undo { "reopened" } else { "done" });
+            }
+            PlanCmd::Rm { id } => {
+                client.call(reqwest::Method::DELETE, &format!("/api/planner/{id}"), None).await?;
+                println!("Task {id} removed");
+            }
+        },
+        Cmd::Digest { hours, written } => {
+            if written {
+                let v = client.post(&format!("/api/digest/summary?hours={hours}"), json!({})).await?;
+                println!("{}", v["summary"].as_str().unwrap_or(""));
+            } else {
+                let v = client.get(&format!("/api/digest?hours={hours}")).await?;
+                for g in v["groups"].as_array().into_iter().flatten() {
+                    println!("{} {} ({})", g["source"].as_str().unwrap_or(""), g["thread"].as_str().unwrap_or(""), g["count"]);
+                    for i in g["items"].as_array().into_iter().flatten() {
+                        println!("  {}", i["title"].as_str().unwrap_or(""));
+                    }
+                }
+            }
+        }
         Cmd::Push { cmd } => {
             let show = |v: &Value| {
                 for e in v["endpoints"].as_array().into_iter().flatten() {

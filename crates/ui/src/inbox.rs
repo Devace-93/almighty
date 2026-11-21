@@ -31,6 +31,8 @@ pub fn InboxView() -> Element {
     use_resource(move || async move {
         let _ = ((shell.inbox_tick)(), reload());
         let tab = tab();
+        // The digest tab has its own data; the counts still come from the inbox.
+        let tab = if tab == "digest" { "fyi".to_string() } else { tab };
         let path = if tab == "done" { "/api/inbox?show=done".to_string() } else { format!("/api/inbox?bucket={tab}") };
         let server = shell.server.peek().clone();
         match api_send(&server, "GET", &path, None).await {
@@ -48,6 +50,14 @@ pub fn InboxView() -> Element {
         let server = shell.server.peek().clone();
         match api_send(&server, "POST", &format!("/api/inbox/{item}"), Some(body)).await {
             Ok(_) => reload += 1,
+            Err(e) => error.set(Some(e)),
+        }
+    };
+
+    let to_plan = move |item: String| async move {
+        let server = shell.server.peek().clone();
+        match api_send(&server, "POST", "/api/planner", Some(json!({ "title": "", "item_id": item }))).await {
+            Ok(_) => error.set(None),
             Err(e) => error.set(Some(e)),
         }
     };
@@ -73,6 +83,14 @@ pub fn InboxView() -> Element {
                 }
                 button {
                     role: "tab",
+                    aria_selected: tab() == "digest",
+                    class: if tab() == "digest" { "inbox-tab active" } else { "inbox-tab" },
+                    title: "What arrived that needs nothing from you, grouped",
+                    onclick: move |_| tab.set("digest".to_string()),
+                    "Digest"
+                }
+                button {
+                    role: "tab",
                     aria_selected: tab() == "done",
                     class: if tab() == "done" { "inbox-tab active" } else { "inbox-tab" },
                     onclick: move |_| tab.set("done".to_string()),
@@ -83,13 +101,15 @@ pub fn InboxView() -> Element {
                 if let Some(e) = error() {
                     p { class: "p-text error", role: "alert", "{e}" }
                 }
-                if entries.is_empty() && data() != Value::Null {
+                if tab() == "digest" {
+                    crate::planner::Digest {}
+                } else if entries.is_empty() && data() != Value::Null {
                     p { class: "p-empty", "Nothing here." }
                 }
-                ul { class: "p-list",
+                ul { class: "p-list", hidden: tab() == "digest",
                     for entry in entries {
                         li { key: "{entry[\"item\"][\"id\"]}",
-                            Entry { entry, on_change: change }
+                            Entry { entry, on_change: change, on_plan: to_plan }
                         }
                     }
                 }
@@ -99,7 +119,7 @@ pub fn InboxView() -> Element {
 }
 
 #[component]
-fn Entry(entry: Value, on_change: EventHandler<(String, Value)>) -> Element {
+fn Entry(entry: Value, on_change: EventHandler<(String, Value)>, on_plan: EventHandler<String>) -> Element {
     let (item, triage) = (&entry["item"], &entry["triage"]);
     let text = |v: &Value| v.as_str().unwrap_or_default().to_string();
     let id = text(&item["id"]);
@@ -113,6 +133,7 @@ fn Entry(entry: Value, on_change: EventHandler<(String, Value)>) -> Element {
     let mut view = use_context::<Shell>().view;
     let reviewable = matches!(item["kind"].as_str(), Some("pull_request") | Some("review_request"));
     let (id_review, title_review) = (id.clone(), title.clone());
+    let id_plan = id.clone();
     let (id_move, id_rank, id_done, id_snooze) = (id.clone(), id.clone(), id.clone(), id.clone());
     rsx! {
         article { class: "inbox-entry",
@@ -170,6 +191,14 @@ fn Entry(entry: Value, on_change: EventHandler<(String, Value)>) -> Element {
                         title: "Open the change: files, risk map and diff",
                         onclick: move |_| view.set(Some(View::Review(id_review.clone(), title_review.clone()))),
                         "Review"
+                    }
+                }
+                if !done {
+                    button {
+                        class: "toggle",
+                        title: "Add to your plan as a task",
+                        onclick: move |_| on_plan.call(id_plan.clone()),
+                        "Plan"
                     }
                 }
                 if !done {

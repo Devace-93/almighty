@@ -180,6 +180,7 @@ pub fn Explainer() -> Element {
             Some(crate::View::Review(..)) => "a code change under review",
             Some(crate::View::Inbox) => "an inbox item",
             Some(crate::View::Push) => "the settings",
+            Some(crate::View::Plan) => "the planner",
             _ => "the app",
         };
         let server = shell.server.peek().clone();

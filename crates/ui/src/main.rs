@@ -10,6 +10,7 @@ mod inbox;
 mod model;
 mod net;
 mod panel;
+mod planner;
 mod review;
 mod settings;
 #[cfg(all(feature = "desktop", target_os = "linux"))]
@@ -56,6 +57,7 @@ pub(crate) enum View {
     Inbox,
     /// Where phone notifications go.
     Push,
+    Plan,
     /// Review of the change behind an item: item id, title.
     Review(String, String),
 }
@@ -232,6 +234,7 @@ fn Workbench(on_add: EventHandler<()>) -> Element {
                     Some(View::Panel(plugin, panel, title)) => rsx! { panel::PanelView { key: "{plugin}/{panel}", plugin, panel, title } },
                     Some(View::Inbox) => rsx! { inbox::InboxView {} },
                     Some(View::Push) => rsx! { settings::PushSettings {} },
+                    Some(View::Plan) => rsx! { planner::PlannerView {} },
                     Some(View::Review(item, title)) => rsx! { review::ReviewView { key: "{item}", item, title } },
                     None => rsx! { div { class: "empty", "Pick a session, or start a new terminal." } },
                 }
@@ -259,6 +262,7 @@ fn Sidebar(on_add: EventHandler<()>) -> Element {
     let mut inbox_tick = shell.inbox_tick;
     let mut events_tick = shell.events_tick;
     let mut inbox_counts = use_signal(|| Value::Null);
+    let mut plan_counts = use_signal(|| Value::Null);
 
     use_resource(move || async move {
         let _ = inbox_tick();
@@ -267,6 +271,10 @@ fn Sidebar(on_add: EventHandler<()>) -> Element {
         let counts = api_get(&server, "/api/inbox/counts").await.unwrap_or(Value::Null);
         if *inbox_counts.peek() != counts {
             inbox_counts.set(counts);
+        }
+        let plan = api_get(&server, "/api/planner").await.map(|v| v["counts"].clone()).unwrap_or(Value::Null);
+        if *plan_counts.peek() != plan {
+            plan_counts.set(plan);
         }
     });
     let mut panels = use_signal(Vec::<panel::PanelRef>::new);
@@ -294,7 +302,7 @@ fn Sidebar(on_add: EventHandler<()>) -> Element {
                 if text.contains("\"type\":\"plugin") || text.contains("\"type\":\"item\"") {
                     plugins_tick += 1;
                 }
-                if text.contains("\"type\":\"inbox\"") || text.contains("\"type\":\"item\"") {
+                if text.contains("\"type\":\"inbox\"") || text.contains("\"type\":\"item\"") || text.contains("\"type\":\"planner\"") {
                     inbox_tick += 1;
                 }
                 if text.contains("\"type\":\"notify\"") {
@@ -426,6 +434,16 @@ fn Sidebar(on_add: EventHandler<()>) -> Element {
                     span { class: "title", "Inbox" }
                     if inbox::pending(&inbox_counts()) > 0 {
                         span { class: "badge", title: "Items that need a reply, an action or preparation", "{inbox::pending(&inbox_counts())}" }
+                    }
+                }
+            }
+            if inbox_counts() != Value::Null {
+                button {
+                    class: if matches!(view(), Some(View::Plan)) { "row active" } else { "row" },
+                    onclick: move |_| view.set(Some(View::Plan)),
+                    span { class: "title", "Plan" }
+                    if planner::pressing(&plan_counts()) > 0 {
+                        span { class: "badge", title: "Overdue or due in the next 24 hours", "{planner::pressing(&plan_counts())}" }
                     }
                 }
             }

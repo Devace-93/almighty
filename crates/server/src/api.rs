@@ -254,6 +254,10 @@ pub fn build(config: Config, store: Store) -> (Router, App) {
         .route("/api/push", get(push_list).post(push_add))
         .route("/api/push/test", post(push_test))
         .route("/api/push/{id}", delete(push_remove))
+        .route("/api/planner", get(planner).post(planner_add))
+        .route("/api/planner/{id}", post(planner_change).delete(planner_delete))
+        .route("/api/digest", get(digest))
+        .route("/api/digest/summary", post(digest_summary))
         .route("/api/inbox", get(inbox))
         .route("/api/inbox/counts", get(inbox_counts))
         .route("/api/inbox/preferences", get(inbox_preferences))
@@ -1578,6 +1582,73 @@ async fn push_test(State(app): State<App>, Extension(who): Who) -> ApiResult {
         .await
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(Json(json!({ "delivered": delivered, "endpoints": app.store.push_list(id) })))
+}
+
+// ---- planner and digest ----
+
+async fn planner(State(app): State<App>, Extension(who): Who, Query(q): Query<HashMap<String, String>>) -> ApiResult {
+    let (id, name) = need_role(&who, Role::Member)?;
+    Ok(Json(crate::planner::plan(&app.triage, id, name, q.get("done").is_some_and(|v| v == "1"))))
+}
+
+async fn planner_add(State(app): State<App>, Extension(who): Who, Json(new): Json<crate::planner::NewTask>) -> ApiResult {
+    let (id, name) = need_role(&who, Role::Member)?;
+    let task = app.store.task_add(id, &new).map_err(bad)?;
+    app.emit(json!({ "type": "planner", "user": name }));
+    Ok(Json(json!({ "task": task })))
+}
+
+async fn planner_change(
+    State(app): State<App>,
+    Extension(who): Who,
+    Path(task): Path<i64>,
+    Json(change): Json<crate::planner::TaskChange>,
+) -> ApiResult {
+    let (id, name) = need_role(&who, Role::Member)?;
+    let task = app.store.task_change(id, task, &change).map_err(|e| {
+        if e == "no such task" {
+            ApiError(StatusCode::NOT_FOUND, e)
+        } else {
+            bad(e)
+        }
+    })?;
+    app.emit(json!({ "type": "planner", "user": name }));
+    Ok(Json(json!({ "task": task })))
+}
+
+async fn planner_delete(State(app): State<App>, Extension(who): Who, Path(task): Path<i64>) -> ApiResult {
+    let (id, name) = need_role(&who, Role::Member)?;
+    if !app.store.task_delete(id, task) {
+        return Err(ApiError(StatusCode::NOT_FOUND, "no such task".into()));
+    }
+    app.emit(json!({ "type": "planner", "user": name }));
+    Ok(Json(json!({ "ok": true })))
+}
+
+fn digest_hours(q: &HashMap<String, String>) -> u64 {
+    q.get("hours").and_then(|h| h.parse().ok()).unwrap_or(24)
+}
+
+async fn digest(State(app): State<App>, Extension(who): Who, Query(q): Query<HashMap<String, String>>) -> ApiResult {
+    let (id, name) = need_role(&who, Role::Member)?;
+    Ok(Json(crate::planner::digest(&app.triage, id, name, digest_hours(&q))))
+}
+
+/// The digest written out by the operator's model, on request.
+async fn digest_summary(State(app): State<App>, Extension(who): Who, Query(q): Query<HashMap<String, String>>) -> ApiResult {
+    let (id, name) = need_role(&who, Role::Member)?;
+    let digest = crate::planner::digest(&app.triage, id, name, digest_hours(&q));
+    if digest["total"] == 0 {
+        return Ok(Json(json!({ "summary": "", "total": 0 })));
+    }
+    let language = crate::triage::Prefs::load(&app.config.data_dir, name).unwrap_or_default().input_language;
+    let input = json!({
+        "language": if language.is_empty() { "English" } else { language.as_str() },
+        "groups": digest["groups"],
+    })
+    .to_string();
+    let answer = ask_model(&app, crate::planner::DIGEST_INSTRUCTIONS, input, "low").await?;
+    Ok(Json(json!({ "summary": answer.trim(), "total": digest["total"] })))
 }
 
 // ---- inbox ----

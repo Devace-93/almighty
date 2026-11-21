@@ -319,3 +319,51 @@ pub async fn sso_code(server: &str) -> Result<String, String> {
 pub async fn sso_code(_server: &str) -> Result<String, String> {
     Err("Sign-in through an identity provider is not available on this device yet.".into())
 }
+
+/// Days since 1970-01-01 for a civil date (Howard Hinnant's algorithm).
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y.rem_euclid(400);
+    let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + d - 1;
+    era * 146_097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719_468
+}
+
+/// `2026-11-30` (what a date field gives) to Unix seconds at 00:00 UTC.
+pub fn date_to_unix(date: &str) -> Option<u64> {
+    let mut parts = date.trim().split('-').map(|p| p.parse::<i64>().ok());
+    let (y, m, d) = (parts.next()??, parts.next()??, parts.next()??);
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) || !(1970..=9999).contains(&y) {
+        return None;
+    }
+    u64::try_from(days_from_civil(y, m, d) * 86_400).ok()
+}
+
+/// Unix seconds to `2026-11-30` (UTC).
+pub fn unix_to_date(secs: u64) -> String {
+    let z = (secs / 86_400) as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + if m <= 2 { 1 } else { 0 };
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+#[cfg(test)]
+mod date_tests {
+    use super::*;
+
+    #[test]
+    fn dates_round_trip() {
+        assert_eq!(date_to_unix("1970-01-01"), Some(0));
+        assert_eq!(date_to_unix("2026-11-21"), Some(1_795_219_200));
+        assert_eq!(unix_to_date(1_795_219_200 + 86_399), "2026-11-21");
+        assert_eq!(unix_to_date(date_to_unix("2028-02-29").unwrap()), "2028-02-29");
+        assert_eq!(date_to_unix("2026-13-01"), None);
+        assert_eq!(date_to_unix("tomorrow"), None);
+    }
+}

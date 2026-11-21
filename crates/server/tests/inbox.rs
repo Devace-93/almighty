@@ -397,3 +397,72 @@ async fn push_goes_only_where_the_operator_allows() {
     assert_eq!(call(&router, "DELETE", &format!("/api/push/{}", added["id"]), &ana, None).await.0, StatusCode::OK);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn planner_and_digest() {
+    let dir = data_dir();
+    let (router, app) = app_in(&dir);
+    let ana = token(&app, "ana", Role::Member);
+    let bo = token(&app, "bo", Role::Member);
+    let guest = token(&app, "gus", Role::Guest);
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    let day = 24 * 3600;
+
+    // An event ahead lands in the plan by itself; so does what the person writes down.
+    let review = emit(&app, json!({ "external_id": "ev1", "title": "Quarterly review", "kind": "event", "source": "calendar", "actors": ["cal"], "due": now + 2 * day }));
+    let (status, out) = call(&router, "POST", "/api/planner", &ana, Some(json!({ "title": "Renew passport", "due": now - day }))).await;
+    assert_eq!(status, StatusCode::OK, "{out}");
+    let overdue = out["task"]["id"].as_i64().unwrap();
+    call(&router, "POST", "/api/planner", &ana, Some(json!({ "title": "Read the RFC" }))).await;
+    assert_eq!(call(&router, "POST", "/api/planner", &ana, Some(json!({ "title": "  " }))).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(call(&router, "GET", "/api/planner", &guest, None).await.0, StatusCode::FORBIDDEN);
+
+    let (_, plan) = call(&router, "GET", "/api/planner", &ana, None).await;
+    let seen: Vec<(String, String)> = plan["entries"].as_array().unwrap().iter().map(|e| (e["when"].as_str().unwrap().to_string(), e["title"].as_str().unwrap().to_string())).collect();
+    assert_eq!(
+        seen,
+        [("overdue".to_string(), "Renew passport".to_string()), ("week".to_string(), "Quarterly review".to_string()), ("someday".to_string(), "Read the RFC".to_string())]
+    );
+    assert_eq!(plan["counts"], json!({ "overdue": 1, "today": 0, "week": 1 }));
+    // Plans are personal: bo sees the shared event, not ana's tasks.
+    let (_, theirs) = call(&router, "GET", "/api/planner", &bo, None).await;
+    assert_eq!(theirs["entries"].as_array().unwrap().len(), 1);
+    assert_eq!(call(&router, "POST", &format!("/api/planner/{overdue}"), &bo, Some(json!({ "done": true }))).await.0, StatusCode::NOT_FOUND);
+
+    // An inbox item turned into a task is listed once, as the task.
+    let (_, out) = call(&router, "POST", "/api/planner", &ana, Some(json!({ "title": "", "item_id": review, "due": now + day / 2 }))).await;
+    assert_eq!(out["task"]["title"], "Quarterly review");
+    let (_, plan) = call(&router, "GET", "/api/planner", &ana, None).await;
+    let reviews: Vec<&Value> = plan["entries"].as_array().unwrap().iter().filter(|e| e["title"] == "Quarterly review").collect();
+    assert_eq!((reviews.len(), reviews[0]["kind"].as_str(), reviews[0]["when"].as_str()), (1, Some("task"), Some("today")));
+
+    // Done tasks leave the plan and can be shown again; deleting is final.
+    call(&router, "POST", &format!("/api/planner/{overdue}"), &ana, Some(json!({ "done": true }))).await;
+    assert_eq!(call(&router, "GET", "/api/planner", &ana, None).await.1["counts"]["overdue"], 0);
+    let (_, all) = call(&router, "GET", "/api/planner?done=1", &ana, None).await;
+    assert!(all["entries"].as_array().unwrap().iter().any(|e| e["when"] == "done" && e["title"] == "Renew passport"));
+    assert_eq!(call(&router, "DELETE", &format!("/api/planner/{overdue}"), &ana, None).await.0, StatusCode::OK);
+    assert_eq!(call(&router, "DELETE", &format!("/api/planner/{overdue}"), &ana, None).await.0, StatusCode::NOT_FOUND);
+
+    // Digest: only what is "good to know", grouped by where it comes from, biggest group first.
+    for (n, thread) in [(1, "acme/app"), (2, "acme/app"), (3, "acme/app"), (4, "acme/docs")] {
+        emit(&app, json!({ "external_id": format!("pr{n}"), "title": format!("Change {n}"), "kind": "pull_request", "source": "git", "thread": thread, "actors": ["dev"] }));
+    }
+    emit(&app, json!({ "external_id": "dm", "title": "Need you", "kind": "message", "source": "chat", "actors": ["cy"], "direct": true }));
+    let (status, digest) = call(&router, "GET", "/api/digest?hours=24", &ana, None).await;
+    assert_eq!(status, StatusCode::OK, "{digest}");
+    assert_eq!(digest["total"], 4, "the direct message and the event are not digest material: {digest}");
+    let groups = digest["groups"].as_array().unwrap();
+    assert_eq!((groups[0]["thread"].as_str(), groups[0]["count"].as_u64()), (Some("acme/app"), Some(3)));
+    assert_eq!((groups[1]["thread"].as_str(), groups[1]["people"][0].as_str()), (Some("acme/docs"), Some("dev")));
+    // Nothing configured: the written digest says so; an empty digest never calls a model.
+    assert_eq!(call(&router, "POST", "/api/digest/summary", &ana, None).await.0, StatusCode::SERVICE_UNAVAILABLE);
+    let (_port, seen) = provider(json!({ "stop_reason": "end_turn", "content": [{ "type": "text", "text": "Three changes landed in acme/app." }] }), 200);
+    std::env::set_var("ALMIGHTY_TEST_LLM_KEY", "test-key-123");
+    std::fs::write(dir.join("workspace.toml"), format!("[llm]\nprovider = \"anthropic\"\nbase_url = \"http://127.0.0.1:{_port}\"\napi_key_env = \"ALMIGHTY_TEST_LLM_KEY\"\n")).unwrap();
+    let (_, written) = call(&router, "POST", "/api/digest/summary", &ana, None).await;
+    assert_eq!(written["summary"], "Three changes landed in acme/app.");
+    let request = seen.lock().unwrap()[0].clone();
+    assert!(request.contains("Change 1") && !request.contains("Need you"), "only digest items are sent");
+    let _ = std::fs::remove_dir_all(dir);
+}
