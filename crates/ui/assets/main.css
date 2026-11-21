@@ -524,3 +524,12 @@ span.link { cursor: pointer; text-decoration: underline; }
 .plan-done { text-decoration: line-through; color: var(--muted); }
 .plan-overdue { color: #d06060 !important; }
 .p-list[hidden] { display: none; }
+
+/* Agent access to a terminal */
+.grants { padding: 10px 12px; background: var(--panel); border-bottom: 1px solid var(--line); font-size: 13px; }
+.grants-help { margin: 0 0 8px; color: var(--muted); font-size: 12px; max-width: 70ch; }
+.grants-error { margin: 0 0 8px; color: #d06060; font-size: 12px; }
+.grants-row { display: flex; align-items: center; gap: 10px; padding: 4px 0; }
+.grants-row .title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.grants-row select { padding: 4px 6px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: inherit; }
+@media (max-width: 720px) { .grants-row select { min-height: 40px; } }

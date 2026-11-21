@@ -17,6 +17,9 @@ pub struct SessionInfo {
     /// What the signed-in user may do: `read` or `write`.
     #[serde(default)]
     pub access: String,
+    /// Still running, but taken out of the main list.
+    #[serde(default)]
+    pub background: bool,
 }
 
 /// Sessions in display order with their depth: a terminal opened by the
@@ -282,7 +285,7 @@ mod tests {
     fn tree_and_exit_labels() {
         let s = |id: &str, by: &str| SessionInfo {
             id: id.into(), title: id.into(), cols: 80, rows: 24, exited: false, locked: false, agents: 0,
-            exit_code: None, created_by: by.into(), access: "write".into(),
+            exit_code: None, created_by: by.into(), access: "write".into(), background: false,
         };
         let all = vec![s("s1", "user:ana"), s("s2", "agent:s1"), s("s3", "user:ana"), s("s4", "agent:s2"), s("s5", "agent:s9")];
         let order: Vec<(String, usize)> = session_tree(&all).into_iter().map(|(s, d)| (s.id, d)).collect();

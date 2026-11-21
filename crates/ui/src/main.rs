@@ -6,6 +6,7 @@
 
 mod account;
 mod browser;
+mod grants;
 mod inbox;
 mod model;
 mod net;
@@ -319,7 +320,7 @@ fn Sidebar(on_add: EventHandler<()>) -> Element {
     use_future(move || async move {
         loop {
             let server = shell.server.peek().clone();
-            match api_get(&server, "/api/sessions").await {
+            match api_get(&server, "/api/sessions?all=1").await {
                 Some(v) => {
                     online.set(true);
                     let list: Vec<SessionInfo> = serde_json::from_value(v["sessions"].clone()).unwrap_or_default();
@@ -390,6 +391,8 @@ fn Sidebar(on_add: EventHandler<()>) -> Element {
         Some(View::Terminal(id)) | Some(View::Agent(id, _)) => Some(id),
         _ => None,
     };
+    // Sessions sent to the background keep running; they get their own list.
+    let (behind, front): (Vec<SessionInfo>, Vec<SessionInfo>) = sessions().into_iter().partition(|s| s.background);
     let selected_agent = match view() {
         Some(View::Agent(_, a)) => Some(a),
         _ => None,
@@ -493,7 +496,7 @@ fn Sidebar(on_add: EventHandler<()>) -> Element {
                 h2 { class: "section", "Terminals" }
             }
             ul { class: "sessions",
-                for (s, depth) in session_tree(&sessions()) {
+                for (s, depth) in session_tree(&front) {
                     li { key: "{s.id}",
                         div { class: "session-row", style: "padding-left: {depth * 14}px",
                             button {
@@ -613,6 +616,56 @@ fn Sidebar(on_add: EventHandler<()>) -> Element {
                     }
                 }
             }
+            if !behind.is_empty() {
+                h2 { class: "section", "In the background" }
+                ul { class: "sessions",
+                    for s in behind {
+                        li { key: "{s.id}",
+                            div { class: "session-row",
+                                button {
+                                    class: "row",
+                                    title: "Still running. Bring it back to the list.",
+                                    onclick: {
+                                        let id = s.id.clone();
+                                        move |_| {
+                                            let id = id.clone();
+                                            async move {
+                                                let server = shell.server.peek().clone();
+                                                if api_post(&server, &format!("/api/sessions/{id}/background"), json!({ "background": false })).await.is_some() {
+                                                    view.set(Some(View::Terminal(id)));
+                                                }
+                                                refresh += 1;
+                                            }
+                                        }
+                                    },
+                                    span { class: if s.exited { "state exited" } else { "state running" } }
+                                    span { class: "title", "{s.title}" }
+                                    span { class: "kind", "Bring back" }
+                                }
+                                if s.access != "read" {
+                                    button {
+                                        class: "icon-button small",
+                                        aria_label: "End session {s.title}",
+                                        title: "Ends the process",
+                                        onclick: {
+                                            let id = s.id.clone();
+                                            move |_| {
+                                                let id = id.clone();
+                                                async move {
+                                                    let server = shell.server.peek().clone();
+                                                    let _ = api_delete(&server, &format!("/api/sessions/{id}")).await;
+                                                    refresh += 1;
+                                                }
+                                            }
+                                        },
+                                        Icon { name: "close" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -680,6 +733,7 @@ fn TerminalView(id: String) -> Element {
     // Rich mode: images the application printed inline.
     let mut media = use_signal(Vec::<Value>::new);
     let mut zoomed = use_signal(|| None::<u64>);
+    let mut sharing = use_signal(|| false);
     let media_id = id.clone();
     use_resource(move || {
         let path = format!("/api/sessions/{media_id}/media");
@@ -801,6 +855,18 @@ fn TerminalView(id: String) -> Element {
                     onclick: move |_| tx.send(json!({ "type": "lock", "locked": !locked }).to_string()),
                     if locked { "Agents locked out" } else { "Agents allowed" }
                 }
+                if can_write() && !g.exited {
+                    button {
+                        class: if sharing() { "toggle on" } else { "toggle" },
+                        title: "Choose which agents may read or type into this terminal",
+                        aria_expanded: sharing(),
+                        onclick: move |_| sharing.set(!sharing()),
+                        "Agent access"
+                    }
+                }
+            }
+            if sharing() {
+                grants::Grants { id: id.clone() }
             }
             if !media().is_empty() {
                 div { class: if zoomed().is_some() { "media-strip zoomed" } else { "media-strip" }, role: "group", aria_label: "Images shown in this terminal",
