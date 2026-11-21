@@ -336,3 +336,64 @@ async fn model_step_refines_and_fails_safely() {
     }
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn push_goes_only_where_the_operator_allows() {
+    let dir = data_dir();
+    let (router, app) = app_in(&dir);
+    let ana = token(&app, "ana", Role::Member);
+    let bo = token(&app, "bo", Role::Member);
+    let (port, seen) = provider(json!({}), 200);
+    let topic = format!("http://127.0.0.1:{port}/ana-topic");
+
+    // Off until the operator lists a host.
+    let (status, out) = call(&router, "POST", "/api/push", &ana, Some(json!({ "url": topic }))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(out["error"].as_str().unwrap().contains("push is off"), "{out}");
+
+    let policy = |content: &str| std::fs::write(dir.join("workspace.toml"), format!("[push]\nallowed_hosts = [\"127.0.0.1:{port}\"]\n{content}")).unwrap();
+    policy("");
+    assert_eq!(call(&router, "POST", "/api/push", &ana, Some(json!({ "url": "https://elsewhere.example/t" }))).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(call(&router, "POST", "/api/push", &ana, Some(json!({ "url": "http://127.0.0.1:1/t" }))).await.0, StatusCode::BAD_REQUEST);
+    let (status, added) = call(&router, "POST", "/api/push", &ana, Some(json!({ "url": topic, "label": "phone" }))).await;
+    assert_eq!(status, StatusCode::OK, "{added}");
+    let (_, list) = call(&router, "GET", "/api/push", &ana, None).await;
+    assert_eq!((list["endpoints"][0]["label"].as_str(), list["content"].as_str()), (Some("phone"), Some("wake")));
+    // Endpoints are personal.
+    assert_eq!(call(&router, "GET", "/api/push", &bo, None).await.1["endpoints"], json!([]));
+    assert_eq!(call(&router, "DELETE", &format!("/api/push/{}", added["id"]), &bo, None).await.0, StatusCode::NOT_FOUND);
+
+    // An item worth a notification is pushed: by default without any content.
+    almighty_server::push::spawn_worker(app.store.clone(), dir.clone(), app.triage.events.clone());
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let dm = emit(&app, json!({ "external_id": "1", "title": "Salary review", "body": "Private details", "kind": "message", "actors": ["cy"], "direct": true }));
+    let triage = app.triage.clone();
+    tokio::task::spawn_blocking(move || triage.process(&dm)).await.unwrap();
+    for _ in 0..50 {
+        if !seen.lock().unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let first = seen.lock().unwrap().first().cloned().expect("a push was sent");
+    assert!(first.starts_with("POST /ana-topic"), "{first}");
+    assert!(first.contains("Something needs your attention") && !first.contains("Salary") && !first.contains("Private"), "{first}");
+
+    // With `content = "summary"` the light summary goes out; the test call reports delivery.
+    policy("content = \"summary\"\n");
+    let (_, out) = call(&router, "POST", "/api/push/test", &ana, None).await;
+    assert_eq!(out["delivered"], 1, "{out}");
+    assert!(out["endpoints"][0]["last_ok_at"].as_u64().is_some());
+    assert!(seen.lock().unwrap().last().unwrap().contains("Push works."));
+
+    // A host removed from the list stops receiving, and the endpoint says why.
+    std::fs::write(dir.join("workspace.toml"), "[push]\nallowed_hosts = [\"ntfy.example.org\"]\n").unwrap();
+    let before = seen.lock().unwrap().len();
+    let (_, out) = call(&router, "POST", "/api/push/test", &ana, None).await;
+    assert_eq!(out["delivered"], 0);
+    assert!(out["endpoints"][0]["last_error"].as_str().unwrap().contains("not in the operator's list"), "{out}");
+    assert_eq!(seen.lock().unwrap().len(), before);
+
+    assert_eq!(call(&router, "DELETE", &format!("/api/push/{}", added["id"]), &ana, None).await.0, StatusCode::OK);
+    let _ = std::fs::remove_dir_all(dir);
+}

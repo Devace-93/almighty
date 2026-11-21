@@ -4,6 +4,7 @@ pub mod hooks;
 pub mod keys;
 pub mod llm;
 pub mod plugins;
+pub mod push;
 pub mod review;
 pub mod service;
 pub mod session;

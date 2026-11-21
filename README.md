@@ -221,7 +221,8 @@ Summary; the contract is [`PLUGINS.md`](PLUGINS.md).
 6. **Service plugins** (almighty's side done, see docs/m6.md; the five apps do not exist yet): manifest, pages in the
    side browser with a signed identity token, signed events both ways, resource links; manifests for flows,
    crew, trace, sketch, blueprint.
-7. **Mobile**: light layout, push, multi-workspace switcher.
+7. **Mobile** (done except native push in the app, see docs/m7.md): phone layout, push through ntfy or
+   UnifiedPush endpoints, multi-workspace switcher.
 8. **OIDC**, team roles, install skills for company deployments.
 9. **Planner + awareness digests**; ACP adapter for other agent runtimes.
 
@@ -250,7 +251,8 @@ First plugin (needs `rustup target add wasm32-wasip2`):
 # then list repositories in <data dir>/workspace.toml, see plugins/github/README.md
 ```
 
-Notes: [`docs/m6.md`](docs/m6.md) (service plugins),
+Notes: [`docs/m7.md`](docs/m7.md) (phone layout, push),
+[`docs/m6.md`](docs/m6.md) (service plugins),
 [`docs/m5.md`](docs/m5.md) (review, explainer, inline images),
 [`docs/m4.md`](docs/m4.md) (inbox, triage, Slack and Gmail connectors),
 [`docs/m3.md`](docs/m3.md) (plugin host, GitHub connector),

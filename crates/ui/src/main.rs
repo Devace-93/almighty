@@ -11,6 +11,7 @@ mod model;
 mod net;
 mod panel;
 mod review;
+mod settings;
 #[cfg(all(feature = "desktop", target_os = "linux"))]
 mod sidebrowser;
 #[cfg(all(feature = "desktop", target_os = "windows"))]
@@ -53,6 +54,8 @@ pub(crate) enum View {
     /// A plugin panel: plugin id, panel id, title.
     Panel(String, String, String),
     Inbox,
+    /// Where phone notifications go.
+    Push,
     /// Review of the change behind an item: item id, title.
     Review(String, String),
 }
@@ -204,8 +207,23 @@ fn Workbench(on_add: EventHandler<()>) -> Element {
         view.set(None);
         browser.set(Browser::default());
     });
+    // Phones show either the menu or the chosen view; picking something closes the menu.
+    let mut menu = use_signal(|| true);
+    use_effect(move || {
+        let chosen = view().is_some();
+        menu.set(!chosen);
+    });
+    let layout = match (browser().visible(), menu()) {
+        (true, true) => "app with-browser menu-open",
+        (true, false) => "app with-browser menu-closed",
+        (false, true) => "app menu-open",
+        (false, false) => "app menu-closed",
+    };
     rsx! {
-        div { class: if browser().visible() { "app with-browser" } else { "app" },
+        div { class: layout,
+            button { class: "menu-button toggle", aria_expanded: menu(), onclick: move |_| menu.toggle(),
+                if menu() { "Close menu" } else { "Menu" }
+            }
             Sidebar { on_add }
             main { class: "center",
                 match view() {
@@ -213,6 +231,7 @@ fn Workbench(on_add: EventHandler<()>) -> Element {
                     Some(View::Agent(sid, aid)) => rsx! { AgentView { key: "{sid}-{aid}", session: sid, agent: aid } },
                     Some(View::Panel(plugin, panel, title)) => rsx! { panel::PanelView { key: "{plugin}/{panel}", plugin, panel, title } },
                     Some(View::Inbox) => rsx! { inbox::InboxView {} },
+                    Some(View::Push) => rsx! { settings::PushSettings {} },
                     Some(View::Review(item, title)) => rsx! { review::ReviewView { key: "{item}", item, title } },
                     None => rsx! { div { class: "empty", "Pick a session, or start a new terminal." } },
                 }
@@ -392,6 +411,9 @@ fn Sidebar(on_add: EventHandler<()>) -> Element {
                 }
                 button { class: "toggle", title: "Sign in to another workspace", onclick: move |_| on_add.call(()), "Add" }
                 button { class: "toggle", title: "Sign out of this workspace", onclick: sign_out, "Sign out" }
+                if inbox_counts() != Value::Null {
+                    button { class: "toggle", title: "Where phone notifications go", onclick: move |_| view.set(Some(View::Push)), "Phone alerts" }
+                }
             }
             button { class: "new", onclick: new_terminal, "+ New terminal" }
             if !online() {

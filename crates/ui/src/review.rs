@@ -179,6 +179,7 @@ pub fn Explainer() -> Element {
             Some(crate::View::Agent(..)) => "an agent's transcript",
             Some(crate::View::Review(..)) => "a code change under review",
             Some(crate::View::Inbox) => "an inbox item",
+            Some(crate::View::Push) => "the settings",
             _ => "the app",
         };
         let server = shell.server.peek().clone();

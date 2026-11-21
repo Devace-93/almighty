@@ -238,6 +238,9 @@ pub fn build(config: Config, store: Store) -> (Router, App) {
         .route("/api/review/{item}", get(review))
         .route("/api/review/{item}/summary", post(review_summary))
         .route("/api/explain", post(explain))
+        .route("/api/push", get(push_list).post(push_add))
+        .route("/api/push/test", post(push_test))
+        .route("/api/push/{id}", delete(push_remove))
         .route("/api/inbox", get(inbox))
         .route("/api/inbox/counts", get(inbox_counts))
         .route("/api/inbox/preferences", get(inbox_preferences))
@@ -260,6 +263,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     let (router, app) = build(config, store);
     crate::plugins::spawn_scheduler(app.plugins.clone());
     crate::triage::spawn_worker(app.triage.clone());
+    crate::push::spawn_worker(app.store.clone(), app.config.data_dir.clone(), app.triage.events.clone());
     let names = app.clone();
     crate::service::spawn_outbound(app.plugins.clone(), app.store.clone(), app.triage.events.clone(), move || names.store.workspace_name());
     eprintln!("almightyd listening on {} (data: {})", app.config.url(), app.config.data_dir.display());
@@ -1400,6 +1404,51 @@ async fn explain(State(app): State<App>, Extension(who): Who, Json(req): Json<Ex
     .to_string();
     let answer = ask_model(&app, crate::review::EXPLAIN_INSTRUCTIONS, input, "low").await?;
     Ok(Json(json!({ "explanation": answer.trim() })))
+}
+
+// ---- push ----
+
+async fn push_list(State(app): State<App>, Extension(who): Who) -> ApiResult {
+    let (id, _) = need_role(&who, Role::Member)?;
+    let policy = crate::push::Policy::load(&app.config.data_dir);
+    Ok(Json(json!({
+        "endpoints": app.store.push_list(id),
+        "allowed_hosts": policy.allowed_hosts,
+        "content": if policy.summary { "summary" } else { "wake" },
+    })))
+}
+
+#[derive(Deserialize)]
+struct PushReq {
+    url: String,
+    #[serde(default)]
+    label: String,
+}
+
+async fn push_add(State(app): State<App>, Extension(who): Who, Json(req): Json<PushReq>) -> ApiResult {
+    let (id, _) = need_role(&who, Role::Member)?;
+    let url = req.url.trim();
+    crate::push::Policy::load(&app.config.data_dir).check(url).map_err(bad)?;
+    let endpoint = app.store.push_add(id, url, req.label.trim()).map_err(bad)?;
+    Ok(Json(json!({ "id": endpoint })))
+}
+
+async fn push_remove(State(app): State<App>, Extension(who): Who, Path(endpoint): Path<i64>) -> ApiResult {
+    let (id, _) = need_role(&who, Role::Member)?;
+    if !app.store.push_remove(id, endpoint) {
+        return Err(ApiError(StatusCode::NOT_FOUND, "no such endpoint".into()));
+    }
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// Sends a test push to the caller's endpoints and reports what happened.
+async fn push_test(State(app): State<App>, Extension(who): Who) -> ApiResult {
+    let (id, _) = need_role(&who, Role::Member)?;
+    let (store, data_dir) = (app.store.clone(), app.config.data_dir.clone());
+    let delivered = tokio::task::spawn_blocking(move || crate::push::send(&store, &data_dir, id, "almighty test", "Push works."))
+        .await
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(json!({ "delivered": delivered, "endpoints": app.store.push_list(id) })))
 }
 
 // ---- inbox ----

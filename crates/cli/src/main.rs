@@ -115,6 +115,11 @@ enum Cmd {
         #[arg(long, default_value = "open")]
         show: String,
     },
+    /// Phone notifications through an ntfy topic or a UnifiedPush endpoint.
+    Push {
+        #[command(subcommand)]
+        cmd: PushCmd,
+    },
     /// List items that connectors brought in.
     Items {
         #[arg(long)]
@@ -127,6 +132,22 @@ enum Cmd {
     Hook,
     /// MCP server over stdio exposing the terminal control tools.
     Mcp,
+}
+
+#[derive(Subcommand)]
+enum PushCmd {
+    /// Register an endpoint, e.g. https://ntfy.example.org/my-secret-topic
+    Add {
+        /// The topic or endpoint address (not the almighty server's URL).
+        endpoint: String,
+        #[arg(long, default_value = "")]
+        label: String,
+    },
+    /// Your endpoints and what the operator allows.
+    List,
+    Remove { id: i64 },
+    /// Send a test notification to your endpoints.
+    Test,
 }
 
 #[derive(Subcommand)]
@@ -449,6 +470,43 @@ async fn main() -> Result<()> {
         }
         Cmd::Mcp => mcp::serve(client).await?,
         Cmd::Plugin { cmd } => plugin::run(&client, cmd).await?,
+        Cmd::Push { cmd } => {
+            let show = |v: &Value| {
+                for e in v["endpoints"].as_array().into_iter().flatten() {
+                    let state = match (e["last_error"].as_str(), e["last_ok_at"].as_u64()) {
+                        (Some(err), _) => format!("error: {err}"),
+                        (None, Some(_)) => "ok".to_string(),
+                        (None, None) => "not used yet".to_string(),
+                    };
+                    println!("{}\t{}\t{}\t{}", e["id"], e["label"].as_str().unwrap_or(""), e["url"].as_str().unwrap_or(""), state);
+                }
+            };
+            match cmd {
+                PushCmd::Add { endpoint, label } => {
+                    let v = client.post("/api/push", json!({ "url": endpoint, "label": label })).await?;
+                    println!("Endpoint {} added. Try it with `almighty push test`.", v["id"]);
+                }
+                PushCmd::List => {
+                    let v = client.get("/api/push").await?;
+                    let hosts: Vec<&str> = v["allowed_hosts"].as_array().into_iter().flatten().filter_map(|h| h.as_str()).collect();
+                    if hosts.is_empty() {
+                        eprintln!("Push is off: no host is listed under [push] allowed_hosts in workspace.toml.");
+                    } else {
+                        eprintln!("Allowed hosts: {}. Content: {}.", hosts.join(", "), v["content"].as_str().unwrap_or(""));
+                    }
+                    show(&v);
+                }
+                PushCmd::Remove { id } => {
+                    client.call(reqwest::Method::DELETE, &format!("/api/push/{id}"), None).await?;
+                    println!("Endpoint {id} removed");
+                }
+                PushCmd::Test => {
+                    let v = client.post("/api/push/test", json!({})).await?;
+                    println!("Delivered to {} endpoint(s)", v["delivered"]);
+                    show(&v);
+                }
+            }
+        }
         Cmd::Inbox { cmd: None, bucket, show } => {
             let mut path = format!("/api/inbox?show={show}");
             if let Some(b) = bucket {

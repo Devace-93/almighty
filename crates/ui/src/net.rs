@@ -81,6 +81,12 @@ pub async fn clear_field(id: &str) -> Result<(), dioxus::document::EvalError> {
     dioxus::document::eval(&script).await.map(|_| ())
 }
 
+/// Empties the inputs matched by a fixed CSS selector (never built from user text).
+pub fn clear_inputs(selector: &'static str) {
+    let script = format!("document.querySelectorAll({selector:?}).forEach(e => e.value = '');");
+    let _ = dioxus::document::eval(&script);
+}
+
 /// Small persistent key/value store for the client's own settings (the
 /// workspace list). Browser: localStorage. Desktop: a private file in the
 /// user's configuration directory. Phones: not persisted yet.
