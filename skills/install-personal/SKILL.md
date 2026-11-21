@@ -30,6 +30,11 @@ The server listens on `127.0.0.1` only. Nothing is exposed to the network.
 `workspace.toml`, `users/<name>/`, `plugins/`. Back the directory up as a
 whole; the database without `secret.key` cannot read stored secrets.
 
+The two key files are created readable by the owner only on Linux and
+macOS. On Windows they inherit the permissions of the data directory: keep
+it under the user profile (the default), or restrict the folder yourself if
+you move it, so other local users cannot read the keys.
+
 ## Check before finishing
 
 - `almighty whoami` prints the owner.

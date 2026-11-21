@@ -51,3 +51,16 @@ fn a_program_that_is_not_an_agent_fails_clearly() {
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("closed its output"));
 }
+
+#[cfg(unix)]
+#[test]
+fn a_program_that_prints_bytes_that_are_not_text_fails_clearly() {
+    let exe = env!("CARGO_BIN_EXE_almighty");
+    let out = Command::new(exe)
+        .args(["acp", "--prompt", "x", "--", "sh", "-c", "printf '\\377\\376\\n'; sleep 1"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("not an ACP agent"), "{}", String::from_utf8_lossy(&out.stderr));
+}

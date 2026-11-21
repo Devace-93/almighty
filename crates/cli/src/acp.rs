@@ -47,9 +47,14 @@ struct Agent {
 impl Agent {
     async fn send(&mut self, message: Value) -> Result<()> {
         // One message per line: serde_json never emits raw newlines.
-        self.stdin.write_all(format!("{message}\n").as_bytes()).await?;
-        self.stdin.flush().await?;
-        Ok(())
+        let line = format!("{message}\n");
+        let written = async {
+            self.stdin.write_all(line.as_bytes()).await?;
+            self.stdin.flush().await
+        };
+        // An agent that already ended can fail this write before any read sees
+        // the end of its output (seen on Windows): report it the same way.
+        written.await.ok().context("the agent closed its output")
     }
 
     /// Sends a request and handles everything the agent says until its answer arrives.
@@ -58,7 +63,9 @@ impl Agent {
         let id = self.next_id;
         self.send(json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params })).await?;
         loop {
-            let line = self.lines.next_line().await?.context("the agent closed its output")?;
+            // Output that is not text (a program printing in a legacy code page) is not an agent.
+            let line = self.lines.next_line().await.ok().context("the program's output is not text: it is not an ACP agent")?;
+            let line = line.context("the agent closed its output")?;
             let Ok(message) = serde_json::from_str::<Value>(&line) else { continue };
             if message.get("method").is_some() {
                 self.incoming(&message).await?;

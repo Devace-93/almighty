@@ -369,6 +369,11 @@ fn is_claude(command: &[String]) -> bool {
 /// one-time code, after the person signs in at the identity provider.
 async fn sso_code(url: &str) -> Result<String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    // Ask first: without a provider the address below would only show an error page.
+    let workspace: Value = reqwest::get(format!("{url}/api/workspace")).await.context("the server did not answer")?.json().await?;
+    if workspace["sso"].is_null() {
+        bail!("this workspace has no identity provider configured: sign in with --name, or add [oidc] to workspace.toml");
+    }
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let port = listener.local_addr()?.port();
     let start = format!("{url}/api/auth/oidc/start?device=cli&redirect=http://127.0.0.1:{port}/");
