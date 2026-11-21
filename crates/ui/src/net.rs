@@ -80,3 +80,60 @@ pub async fn clear_field(id: &str) -> Result<(), dioxus::document::EvalError> {
     let script = format!("const e = document.getElementById('{id}'); if (e) e.value = ''; return true;");
     dioxus::document::eval(&script).await.map(|_| ())
 }
+
+/// Small persistent key/value store for the client's own settings (the
+/// workspace list). Browser: localStorage. Desktop: a private file in the
+/// user's configuration directory. Phones: not persisted yet.
+pub fn storage_get(key: &str) -> Option<String> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        return web_sys::window()?.local_storage().ok()??.get_item(key).ok()?;
+    }
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))]
+    {
+        return std::fs::read_to_string(storage_path(key)?).ok();
+    }
+    #[allow(unreachable_code)]
+    {
+        let _ = key;
+        None
+    }
+}
+
+pub fn storage_set(key: &str, value: &str) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        if let Some(Ok(Some(storage))) = web_sys::window().map(|w| w.local_storage()) {
+            let _ = storage.set_item(key, value);
+        }
+    }
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))]
+    {
+        let Some(path) = storage_path(key) else { return };
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        #[cfg(unix)]
+        {
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            // It holds sign-in tokens: private from the moment it exists.
+            if let Ok(mut f) = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&path) {
+                let _ = f.write_all(value.as_bytes());
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = std::fs::write(&path, value);
+        }
+    }
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        let _ = (key, value);
+    }
+}
+
+#[cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))]
+fn storage_path(key: &str) -> Option<std::path::PathBuf> {
+    Some(dirs::config_dir()?.join("almighty").join(format!("{key}.json")))
+}

@@ -39,6 +39,41 @@ pub struct SessionInfo {
     pub exit_code: Option<u32>,
     pub locked: bool,
     pub agents: usize,
+    /// `user:<name>` or `agent:<session>`.
+    pub created_by: String,
+}
+
+/// Who started a session; decides which agent may drive it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Creator {
+    User(String),
+    Agent(String),
+}
+
+impl Creator {
+    pub fn label(&self) -> String {
+        match self {
+            Creator::User(name) => format!("user:{name}"),
+            Creator::Agent(session) => format!("agent:{session}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Scope {
+    Read,
+    Write,
+}
+
+/// What `Session::spawn` needs besides the request itself.
+pub struct SpawnContext {
+    pub server_url: String,
+    /// Token for the process inside the session (hooks, MCP, CLI).
+    pub agent_token: Option<String>,
+    pub created_by: Creator,
+    /// Called whenever something a client lists has changed (e.g. exit).
+    pub on_change: Box<dyn Fn() + Send + Sync>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -100,6 +135,10 @@ pub struct Session {
     pub hook_events: Mutex<Vec<serde_json::Value>>,
     /// Agent-tool calls seen but not yet matched to a SubagentStart.
     pub pending_spawns: Mutex<Vec<PendingSpawn>>,
+    pub created_by: Creator,
+    /// Access given by a person to agents of other sessions, by session id.
+    pub grants: Mutex<HashMap<String, Scope>>,
+    on_change: Box<dyn Fn() + Send + Sync>,
 }
 
 #[derive(Debug, Clone)]
@@ -114,7 +153,7 @@ pub fn now_secs() -> u64 {
 }
 
 impl Session {
-    pub fn spawn(id: String, req: CreateSession, server_url: &str) -> Result<Arc<Session>> {
+    pub fn spawn(id: String, req: CreateSession, ctx: SpawnContext) -> Result<Arc<Session>> {
         anyhow::ensure!(!req.command.is_empty(), "command is empty");
         let cols = req.cols.unwrap_or(120).clamp(2, 500);
         let rows = req.rows.unwrap_or(32).clamp(2, 300);
@@ -134,9 +173,14 @@ impl Session {
         cmd.env("COLORTERM", "truecolor");
         // Lets a process inside the session (an agent CLI, a hook) find its way back.
         cmd.env("ALMIGHTY_SESSION", &id);
-        cmd.env("ALMIGHTY_URL", server_url);
+        cmd.env("ALMIGHTY_URL", &ctx.server_url);
         for (k, v) in &req.env {
             cmd.env(k, v);
+        }
+        // Set last: a caller cannot swap in another identity through `env`.
+        match &ctx.agent_token {
+            Some(token) => cmd.env("ALMIGHTY_TOKEN", token),
+            None => cmd.env_remove("ALMIGHTY_TOKEN"),
         }
 
         let mut child = pair.slave.spawn_command(cmd).context("spawn")?;
@@ -166,6 +210,9 @@ impl Session {
             agents: Mutex::new(Vec::new()),
             hook_events: Mutex::new(Vec::new()),
             pending_spawns: Mutex::new(Vec::new()),
+            created_by: ctx.created_by,
+            grants: Mutex::new(HashMap::new()),
+            on_change: ctx.on_change,
             id,
         });
 
@@ -199,6 +246,7 @@ impl Session {
                 let _ = exit_rx.recv_timeout(Duration::from_secs(5));
                 s.exited.store(true, Ordering::SeqCst);
                 s.bump();
+                (s.on_change)();
             })
             .context("pty thread")?;
 
@@ -243,6 +291,7 @@ impl Session {
             exit_code: *self.exit_code.lock().unwrap(),
             locked: self.locked.load(Ordering::SeqCst),
             agents: self.agents.lock().unwrap().len(),
+            created_by: self.created_by.label(),
         }
     }
 

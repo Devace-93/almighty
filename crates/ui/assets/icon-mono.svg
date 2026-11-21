@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <title>almighty</title>
+  <style>
+    :root { color: #1B1C3D; }
+    @media (prefers-color-scheme: dark) { :root { color: #F4F3FF; } }
+  </style>
+  <circle cx="440" cy="512" r="296" fill="none" stroke="currentColor" stroke-width="176"/>
+  <rect x="760" y="128" width="184" height="768" rx="40" fill="currentColor"/>
+</svg>

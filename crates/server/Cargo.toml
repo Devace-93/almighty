@@ -22,3 +22,13 @@ portable-pty = "0.9"
 vt100 = "0.18"
 regex = "1"
 futures-util = "0.3"
+rusqlite = { version = "0.37", features = ["bundled"] }
+argon2 = "0.5"
+rand = "0.9"
+sha2 = "0.10"
+base64 = "0.22"
+dirs = "6"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

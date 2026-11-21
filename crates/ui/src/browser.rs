@@ -222,7 +222,10 @@ pub fn BrowserPanel() -> Element {
                     }
                 }
             }
-            AddressBar { url: active.url.clone() }
+            // A keyed list of one: a new key gives a fresh, correctly filled field.
+            for address in [active.clone()] {
+                AddressBar { key: "{address.id}|{address.url}", url: address.url }
+            }
             if cfg!(target_arch = "wasm32") {
                 // One frame per tab, so switching tabs keeps each page's state.
                 for tab in state.tabs.iter().cloned() {
@@ -243,10 +246,10 @@ pub fn BrowserPanel() -> Element {
 #[component]
 fn AddressBar(url: String) -> Element {
     let mut browser = use_context::<Shell>().browser;
+    // Uncontrolled field (see ConnectScreen); the parent re-creates this
+    // component when the active tab or its address changes.
     let mut draft = use_signal(|| url.clone());
-    // Follow the active tab: switching tabs or navigating replaces the draft.
-    let shown = url.clone();
-    use_effect(use_reactive!(|shown| draft.set(shown)));
+    let initial = url.clone();
     rsx! {
         form {
             class: "bar",
@@ -263,7 +266,7 @@ fn AddressBar(url: String) -> Element {
             },
             input {
                 r#type: "text",
-                value: "{draft}",
+                initial_value: "{initial}",
                 oninput: move |e| draft.set(e.value()),
                 aria_label: "Address",
             }

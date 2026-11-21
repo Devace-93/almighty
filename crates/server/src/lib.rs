@@ -3,8 +3,9 @@ pub mod api;
 pub mod hooks;
 pub mod keys;
 pub mod session;
+pub mod store;
 
-pub use api::{router, serve, AppState, Config};
+pub use api::{build, serve, App, AppState, Config};
 
 /// The user's home directory on Unix (`HOME`) and Windows (`USERPROFILE`).
 pub fn home_dir() -> Option<String> {

@@ -3,3 +3,8 @@ name = "almighty"
 
 [web.app]
 title = "almighty"
+
+[bundle]
+identifier = "net.ema.almighty"
+publisher = "Enrique Magallon Alvarez"
+icon = ["assets/icon-512.png", "assets/icon-128.png"]

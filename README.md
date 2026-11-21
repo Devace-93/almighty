@@ -10,6 +10,7 @@ can drive. Desktop, mobile and web clients talk to a server **you** run. MIT.
 > simultaneous requests for one person. There is **no public server**: every
 > person, team or company runs its own. A personal instance lives at
 > `almighty.3m4.net`.
+> (`aimighty.3m4.net` only redirects there.)
 
 This repo is **empty on purpose**: this README is the brief for the agent that
 builds it. The plugin contract is [`PLUGINS.md`](PLUGINS.md); read it first.
@@ -204,10 +205,10 @@ Summary; the contract is [`PLUGINS.md`](PLUGINS.md).
 
 ## Milestones
 
-0. **Spikes**: Dioxus shell on Linux + Android + web with a terminal panel
+0. **Spikes** (done): Dioxus shell on Linux + Android + web with a terminal panel
    and a side browser panel; PTY + headless emulator + attach from an external
    terminal; Claude Code subagent tree from hooks.
-1. **Server skeleton**: workspaces, local auth, tokens, SQLite, WebSocket
+1. **Server skeleton** (done, see docs/m1.md): workspaces, local auth, tokens, SQLite, WebSocket
    protocol, `almighty` CLI (`serve`, `attach`, `run`, `term`).
 2. **Terminals**: sessions, multi-client attach, agent tree, control MCP
    tools with key encoding, human-priority lock, desktop client panel.
@@ -222,19 +223,25 @@ Summary; the contract is [`PLUGINS.md`](PLUGINS.md).
 8. **OIDC**, team roles, install skills for company deployments.
 9. **Planner + awareness digests**; ACP adapter for other agent runtimes.
 
-## Quick start (milestone-0 spike)
+## Quick start
 
 ```bash
 cargo build
-./target/debug/almighty serve                 # http://127.0.0.1:8092
+./target/debug/almighty serve                 # http://127.0.0.1:8092, prints a setup code on first run
+./target/debug/almighty setup --code <code> --name <you> --workspace personal
 ./target/debug/almighty run -- claude         # session + your terminal attached (Ctrl-\ detaches)
 ./target/debug/almighty ls
 ./target/debug/almighty attach s1
 ./target/debug/almighty term send-keys s1 C-c # what agents use; also `almighty mcp`
-cd crates/ui && dx serve --web --port 8093    # client in the browser
+cd crates/ui && dx serve --web --port 8093    # client in the browser; sign in there too
 ```
 
-Spike findings: [`docs/spikes/m0.md`](docs/spikes/m0.md).
+Other machines sign in with `almighty login --name <you>` (set `ALMIGHTY_URL`).
+Accounts can also be created locally with `almighty user add <name> --role member`.
+Data lives in `ALMIGHTY_DATA` (default: the user data directory, `almighty/almighty.db`).
+
+Notes: [`docs/m1.md`](docs/m1.md) (accounts, tokens, permissions),
+[`docs/spikes/m0.md`](docs/spikes/m0.md) (spike findings).
 
 ## License
 

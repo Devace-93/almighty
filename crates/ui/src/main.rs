@@ -4,6 +4,7 @@
 // Windows release builds are GUI programs: no console window next to the app.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod account;
 mod browser;
 mod model;
 mod net;
@@ -31,10 +32,12 @@ use dioxus::prelude::*;
 use futures_channel::mpsc::UnboundedReceiver;
 use serde_json::{json, Value};
 
+use account::{Accounts, ConnectScreen};
 use browser::{Browser, BrowserPanel, LinkedText};
 use model::{split_links, AgentNode, Grid, Piece, Run, SessionInfo, TranscriptLine};
 
 const CSS: Asset = asset!("/assets/main.css");
+const ICON: Asset = asset!("/assets/icon.svg");
 
 /// Approximate cell size of the terminal font (13px monospace). Good enough
 /// for the spike; the real client must measure the font.
@@ -50,6 +53,9 @@ enum View {
 #[derive(Clone, Copy)]
 pub(crate) struct Shell {
     pub(crate) server: Signal<String>,
+    /// Token of the active workspace; sent with every request.
+    pub(crate) token: Signal<String>,
+    accounts: Signal<Accounts>,
     view: Signal<Option<View>>,
     pub(crate) browser: Signal<Browser>,
 }
@@ -59,7 +65,8 @@ fn main() {
     #[cfg(all(feature = "desktop", not(any(target_os = "android", target_os = "ios"))))]
     {
         use dioxus::desktop::{Config, WindowBuilder};
-        let window = WindowBuilder::new().with_title("almighty");
+        let icon = dioxus::desktop::icon_from_memory(include_bytes!("../assets/icon-128.png")).ok();
+        let window = WindowBuilder::new().with_title("almighty").with_window_icon(icon);
         // No default "Window / Edit" menu bar: the app has no use for it yet.
         let config = Config::new().with_window(window).with_menu(None);
         dioxus::LaunchBuilder::new().with_cfg(config).launch(App);
@@ -69,29 +76,94 @@ fn main() {
     dioxus::launch(App);
 }
 
+/// Token of the active workspace, readable from any async task.
+pub(crate) static TOKEN: GlobalSignal<String> = Signal::global(String::new);
+
 pub(crate) async fn api_get(server: &str, path: &str) -> Option<Value> {
-    reqwest::get(format!("{server}{path}")).await.ok()?.json().await.ok()
+    let token = TOKEN.peek().clone();
+    let res = reqwest::Client::new().get(format!("{server}{path}")).bearer_auth(token).send().await.ok()?;
+    if !res.status().is_success() {
+        return None;
+    }
+    res.json().await.ok()
 }
 
 async fn api_post(server: &str, path: &str, body: Value) -> Option<Value> {
-    reqwest::Client::new().post(format!("{server}{path}")).json(&body).send().await.ok()?.json().await.ok()
+    let token = TOKEN.peek().clone();
+    let res = reqwest::Client::new().post(format!("{server}{path}")).bearer_auth(token).json(&body).send().await.ok()?;
+    if !res.status().is_success() {
+        return None;
+    }
+    res.json().await.ok()
+}
+
+/// `Some(false)` when the server says the token is no longer valid, `None`
+/// when the server cannot be reached at all.
+async fn token_valid(server: &str) -> Option<bool> {
+    let token = TOKEN.peek().clone();
+    let res = reqwest::Client::new().get(format!("{server}/api/auth/me")).bearer_auth(token).send().await.ok()?;
+    Some(res.status() != reqwest::StatusCode::UNAUTHORIZED)
+}
+
+/// WebSocket URL for `path` on `server`, carrying the token (browsers
+/// cannot set headers on WebSocket requests).
+pub(crate) fn ws_url(server: &str, path: &str) -> String {
+    format!("{}{path}?token={}", server.replacen("http", "ws", 1), TOKEN.peek())
 }
 
 #[component]
 fn App() -> Element {
+    let accounts = use_signal(Accounts::load);
+    let mut adding = use_signal(|| false);
     let shell = Shell {
         server: use_signal(net::default_server),
+        token: use_signal(String::new),
+        accounts,
         view: use_signal(|| None),
         browser: use_signal(Browser::default),
     };
     use_context_provider(|| shell);
-    let view = shell.view;
-    let browser = shell.browser;
+
+    let current = accounts().current().cloned();
+    // Point every request at the active workspace before its panels render.
+    if let Some(ws) = &current {
+        if *shell.server.peek() != ws.url || *TOKEN.peek() != ws.token {
+            let (mut server, mut token) = (shell.server, shell.token);
+            server.set(ws.url.clone());
+            token.set(ws.token.clone());
+            *TOKEN.write() = ws.token.clone();
+        }
+    }
 
     rsx! {
         document::Stylesheet { href: CSS }
+        document::Link { rel: "icon", r#type: "image/svg+xml", href: ICON }
+        match current {
+            Some(ws) if !adding() => rsx! {
+                // Keyed: switching workspace rebuilds every panel from scratch.
+                Workbench { key: "{ws.url}|{ws.user}|{ws.token}", on_add: move |_| adding.set(true) }
+            },
+            Some(_) => rsx! {
+                ConnectScreen { accounts, on_cancel: move |_| adding.set(false) }
+            },
+            None => rsx! { ConnectScreen { accounts } },
+        }
+    }
+}
+
+#[component]
+fn Workbench(on_add: EventHandler<()>) -> Element {
+    let shell = use_context::<Shell>();
+    let mut view = shell.view;
+    let mut browser = shell.browser;
+    // A new workspace starts with nothing selected and no pages open.
+    use_hook(move || {
+        view.set(None);
+        browser.set(Browser::default());
+    });
+    rsx! {
         div { class: if browser().visible() { "app with-browser" } else { "app" },
-            Sidebar {}
+            Sidebar { on_add }
             main { class: "center",
                 match view() {
                     Some(View::Terminal(id)) => rsx! { TerminalView { key: "{id}", id } },
@@ -107,14 +179,25 @@ fn App() -> Element {
 }
 
 #[component]
-fn Sidebar() -> Element {
+fn Sidebar(on_add: EventHandler<()>) -> Element {
     let shell = use_context::<Shell>();
+    let mut accounts = shell.accounts;
+    let mut refresh = use_signal(|| 0u32);
     let mut view = shell.view;
     let mut sessions = use_signal(Vec::<SessionInfo>::new);
     let mut agents = use_signal(Vec::<AgentNode>::new);
     let mut online = use_signal(|| true);
 
-    // Poll the server; a push channel replaces this in milestone 1.
+    // The server pushes "something changed"; the lists are then refetched.
+    use_future(move || async move {
+        loop {
+            let (_tx, mut rx) = futures_channel::mpsc::unbounded::<String>();
+            let url = ws_url(&shell.server.peek(), "/api/events");
+            net::run_ws(url, &mut rx, move |_| refresh += 1).await;
+            net::sleep_ms(2000).await; // connection lost: retry
+        }
+    });
+
     use_future(move || async move {
         loop {
             let server = shell.server.peek().clone();
@@ -126,7 +209,19 @@ fn Sidebar() -> Element {
                         sessions.set(list);
                     }
                 }
-                None => online.set(false),
+                None => {
+                    // Signed out elsewhere or token expired: back to sign-in.
+                    match token_valid(&server).await {
+                        Some(false) => {
+                            let mut all = accounts.write();
+                            all.remove_current();
+                            all.save();
+                            return;
+                        }
+                        Some(true) => online.set(true),
+                        None => online.set(false),
+                    }
+                }
             }
             let current = match &*view.peek() {
                 Some(View::Terminal(id)) | Some(View::Agent(id, _)) => Some(id.clone()),
@@ -142,9 +237,26 @@ fn Sidebar() -> Element {
             if *agents.peek() != list {
                 agents.set(list);
             }
-            net::sleep_ms(1200).await;
+            // Wait for a push, or refetch every 10 s as a safety net.
+            let seen = *refresh.peek();
+            for _ in 0..40 {
+                net::sleep_ms(250).await;
+                if *refresh.peek() != seen {
+                    break;
+                }
+            }
         }
     });
+
+    let sign_out = move |_| async move {
+        let server = shell.server.peek().clone();
+        let _ = api_post(&server, "/api/auth/logout", json!({})).await;
+        let mut all = accounts.write();
+        all.remove_current();
+        all.save();
+    };
+    let all = accounts();
+    let active = all.active.unwrap_or(0);
 
     let new_terminal = move |_| async move {
         let server = shell.server.peek().clone();
@@ -168,8 +280,27 @@ fn Sidebar() -> Element {
     rsx! {
         nav { class: "sidebar",
             header {
-                span { class: "brand", "almighty" }
+                Wordmark {}
                 span { class: if online() { "dot on" } else { "dot off" }, title: "{shell.server}" }
+            }
+            div { class: "workspace",
+                select {
+                    aria_label: "Workspace",
+                    onchange: move |e| {
+                        if let Ok(i) = e.value().parse::<usize>() {
+                            let mut all = accounts.write();
+                            if i < all.list.len() {
+                                all.active = Some(i);
+                                all.save();
+                            }
+                        }
+                    },
+                    for (i, ws) in all.list.iter().enumerate() {
+                        option { value: "{i}", selected: i == active, "{ws.name} · {ws.user}" }
+                    }
+                }
+                button { class: "toggle", title: "Sign in to another workspace", onclick: move |_| on_add.call(()), "Add" }
+                button { class: "toggle", title: "Sign out of this workspace", onclick: sign_out, "Sign out" }
             }
             button { class: "new", onclick: new_terminal, "+ New terminal" }
             if !online() {
@@ -274,12 +405,13 @@ fn TerminalView(id: String) -> Element {
     let shell = use_context::<Shell>();
     let mut grid = use_signal(Grid::default);
     let mut connected = use_signal(|| false);
+    let mut can_write = use_signal(|| true);
 
     let ws_id = id.clone();
     let tx = use_coroutine(move |mut rx: UnboundedReceiver<String>| {
         let id = ws_id.clone();
         async move {
-            let url = format!("{}/api/sessions/{id}/grid", shell.server.peek().replacen("http", "ws", 1));
+            let url = ws_url(&shell.server.peek(), &format!("/api/sessions/{id}/grid"));
             connected.set(true);
             net::run_ws(url, &mut rx, move |text| {
                 let Ok(v) = serde_json::from_str::<Value>(&text) else { return };
@@ -287,6 +419,7 @@ fn TerminalView(id: String) -> Element {
                     if let Ok(g) = serde_json::from_value::<Grid>(v["grid"].clone()) {
                         grid.set(g);
                     }
+                    can_write.set(v["can_write"].as_bool().unwrap_or(true));
                 } else if v["type"] == "patch" {
                     let mut g = grid.write();
                     for line in v["lines"].as_array().into_iter().flatten() {
@@ -339,6 +472,9 @@ fn TerminalView(id: String) -> Element {
                 }
                 if !connected() {
                     span { class: "tag", "disconnected" }
+                }
+                if !can_write() {
+                    span { class: "tag", "read-only" }
                 }
                 button {
                     class: if locked { "toggle on" } else { "toggle" },
@@ -519,6 +655,32 @@ fn AgentView(session: String, agent: String) -> Element {
                     }
                 }
             }
+        }
+    }
+}
+
+/// The wordmark: the app mark (a ring and a block cursor) stands in for the
+/// first two letters, followed by "mighty". Reads as "almighty"; the mark
+/// alone can also be read as "ai".
+#[component]
+pub(crate) fn Wordmark() -> Element {
+    rsx! {
+        span { class: "brand", role: "img", aria_label: "almighty",
+            svg {
+                class: "brand-mark",
+                // Cropped to the mark itself: no tile, so it sits in the text line.
+                view_box: "192 232 616 560",
+                "aria-hidden": "true",
+                defs {
+                    linearGradient { id: "brand-bowl", x1: "0", y1: "0", x2: "1", y2: "1",
+                        stop { offset: "0", stop_color: "var(--mark-from)" }
+                        stop { offset: "1", stop_color: "var(--mark-to)" }
+                    }
+                }
+                circle { cx: "472", cy: "512", r: "212", fill: "none", stroke: "url(#brand-bowl)", stroke_width: "136" }
+                rect { x: "664", y: "232", width: "144", height: "560", rx: "36", fill: "var(--mark-cursor)" }
+            }
+            span { "aria-hidden": "true", "mighty" }
         }
     }
 }

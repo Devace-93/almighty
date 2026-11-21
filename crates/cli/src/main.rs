@@ -1,6 +1,7 @@
 //! `almighty`: server launcher, terminal client and agent control CLI.
 
 mod attach;
+mod creds;
 mod mcp;
 
 use std::collections::HashMap;
@@ -16,7 +17,8 @@ struct Cli {
     /// Server URL.
     #[arg(long, global = true, env = "ALMIGHTY_URL", default_value = "http://127.0.0.1:8092")]
     url: String,
-    /// Bearer token, when the server requires one.
+    /// Token to use instead of the one saved by `almighty login`. Inside a
+    /// session the server sets ALMIGHTY_TOKEN to that session's agent token.
     #[arg(long, global = true, env = "ALMIGHTY_TOKEN", hide_env_values = true)]
     token: Option<String>,
     #[command(subcommand)]
@@ -27,6 +29,46 @@ struct Cli {
 enum Cmd {
     /// Run the server in the foreground.
     Serve,
+    /// Create the first owner of a fresh server (needs the code it printed).
+    Setup {
+        #[arg(long)]
+        code: String,
+        #[arg(long)]
+        name: String,
+        /// Workspace name shown in clients.
+        #[arg(long)]
+        workspace: Option<String>,
+    },
+    /// Sign in and remember the token for this server.
+    Login {
+        #[arg(long)]
+        name: String,
+    },
+    /// Forget the saved token for this server and revoke it.
+    Logout,
+    /// Show who the current token belongs to.
+    Whoami,
+    /// Manage accounts directly in the local data directory (no server needed).
+    User {
+        #[command(subcommand)]
+        cmd: UserCmd,
+    },
+    /// Long-lived tokens for scripts and MCP clients.
+    Token {
+        #[command(subcommand)]
+        cmd: TokenCmd,
+    },
+    /// Let the agent of one session read or drive another session.
+    Grant {
+        /// Session to open up.
+        session: String,
+        /// Session whose agent gets the access.
+        #[arg(long)]
+        agent: String,
+        /// read, write or none.
+        #[arg(long, default_value = "write")]
+        scope: String,
+    },
     /// List sessions.
     Ls,
     /// Start a command in a new session and attach this terminal to it.
@@ -53,6 +95,24 @@ enum Cmd {
     Hook,
     /// MCP server over stdio exposing the terminal control tools.
     Mcp,
+}
+
+#[derive(Subcommand)]
+enum UserCmd {
+    /// Add a user to the database in ALMIGHTY_DATA (asks for a password).
+    Add {
+        name: String,
+        #[arg(long, default_value = "member")]
+        role: String,
+    },
+    List,
+}
+
+#[derive(Subcommand)]
+enum TokenCmd {
+    Create { name: String },
+    List,
+    Revoke { id: i64 },
 }
 
 #[derive(Subcommand)]
@@ -102,6 +162,9 @@ impl Client {
         let res = req.send().await.with_context(|| format!("cannot reach the server at {}", self.url))?;
         let status = res.status();
         let value: Value = res.json().await.unwrap_or(Value::Null);
+        if status == reqwest::StatusCode::UNAUTHORIZED && self.token.is_none() {
+            bail!("not signed in to {}: run `almighty login --name <you>`", self.url);
+        }
         if !status.is_success() {
             bail!("{}", value.get("error").and_then(Value::as_str).unwrap_or(status.as_str()));
         }
@@ -115,6 +178,26 @@ impl Client {
     pub async fn post(&self, path: &str, body: Value) -> Result<Value> {
         self.call(reqwest::Method::POST, path, Some(body)).await
     }
+}
+
+/// Reads a new password twice from the terminal, or once from
+/// ALMIGHTY_PASSWORD for scripts.
+fn read_password(confirm: bool) -> Result<String> {
+    if let Ok(p) = std::env::var("ALMIGHTY_PASSWORD") {
+        return Ok(p);
+    }
+    let first = rpassword::prompt_password("Password: ")?;
+    if confirm && rpassword::prompt_password("Repeat password: ")? != first {
+        bail!("the passwords do not match");
+    }
+    Ok(first)
+}
+
+/// Lets the agent in the session drive terminals through MCP. The server
+/// started by this config inherits the session's own token from the PTY.
+fn claude_mcp_config() -> Result<String> {
+    let exe = std::env::current_exe()?.to_string_lossy().into_owned();
+    Ok(json!({ "mcpServers": { "almighty": { "command": exe, "args": ["mcp"] } } }).to_string())
 }
 
 /// Claude Code settings that report subagent lifecycle back to the server.
@@ -141,15 +224,86 @@ fn claude_hook_settings() -> Result<String> {
 fn is_claude(command: &[String]) -> bool {
     // file_stem, not file_name: on Windows the launcher is claude.exe or claude.cmd.
     std::path::Path::new(&command[0]).file_stem().is_some_and(|n| n.eq_ignore_ascii_case("claude"))
-        && !command.iter().any(|a| a == "--settings")
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let client = Client::new(cli.url, cli.token);
+    let url = cli.url.trim_end_matches('/').to_string();
+    let token = cli.token.or_else(|| creds::load(&url));
+    let client = Client::new(url.clone(), token);
     match cli.cmd {
         Cmd::Serve => almighty_server::serve(almighty_server::Config::from_env()).await?,
+        Cmd::Setup { code, name, workspace } => {
+            let password = read_password(true)?;
+            let v = client
+                .post("/api/setup", json!({ "code": code, "name": name, "password": password, "workspace": workspace }))
+                .await?;
+            creds::save(&url, v["token"].as_str().context("no token in the reply")?)?;
+            println!("Owner {name} created; signed in to {url}");
+        }
+        Cmd::Login { name } => {
+            let password = read_password(false)?;
+            let device = format!("cli on {}", std::env::var("HOSTNAME").or_else(|_| std::env::var("COMPUTERNAME")).unwrap_or_else(|_| "this machine".into()));
+            let v = client.post("/api/auth/login", json!({ "name": name, "password": password, "device": device })).await?;
+            creds::save(&url, v["token"].as_str().context("no token in the reply")?)?;
+            println!("Signed in to {url} as {name} ({})", v["role"].as_str().unwrap_or("?"));
+        }
+        Cmd::Logout => {
+            let _ = client.post("/api/auth/logout", json!({})).await;
+            creds::forget(&url)?;
+            println!("Signed out of {url}");
+        }
+        Cmd::Whoami => {
+            let v = client.get("/api/auth/me").await?;
+            match v["kind"].as_str() {
+                Some("agent") => println!("agent of session {} in workspace {}", v["session"].as_str().unwrap_or("?"), v["workspace"].as_str().unwrap_or("?")),
+                _ => println!("{} ({}) in workspace {}", v["name"].as_str().unwrap_or("?"), v["role"].as_str().unwrap_or("?"), v["workspace"].as_str().unwrap_or("?")),
+            }
+        }
+        Cmd::User { cmd } => {
+            use almighty_server::store::{Role, Store};
+            let store = Store::open(&almighty_server::Config::from_env().db_path())?;
+            match cmd {
+                UserCmd::Add { name, role } => {
+                    let role = Role::parse(&role).context("role must be owner, admin, member or guest")?;
+                    let password = read_password(true)?;
+                    store.create_user(&name, &password, role)?;
+                    println!("User {name} ({}) created", role.as_str());
+                }
+                UserCmd::List => {
+                    for u in store.list_users() {
+                        println!("{}\t{}\t{}", u.id, u.role.as_str(), u.name);
+                    }
+                }
+            }
+        }
+        Cmd::Token { cmd } => match cmd {
+            TokenCmd::Create { name } => {
+                let v = client.post("/api/tokens", json!({ "name": name })).await?;
+                eprintln!("Token {} created. It is shown only once:", v["id"]);
+                println!("{}", v["token"].as_str().unwrap_or(""));
+            }
+            TokenCmd::List => {
+                let v = client.get("/api/tokens").await?;
+                for t in v["tokens"].as_array().into_iter().flatten() {
+                    println!("{}\t{}\t{}", t["id"], t["kind"].as_str().unwrap_or(""), t["name"].as_str().unwrap_or(""));
+                }
+            }
+            TokenCmd::Revoke { id } => {
+                client.call(reqwest::Method::DELETE, &format!("/api/tokens/{id}"), None).await?;
+                println!("Token {id} revoked");
+            }
+        },
+        Cmd::Grant { session, agent, scope } => {
+            let scope = match scope.as_str() {
+                "read" | "write" => json!(scope),
+                "none" => Value::Null,
+                _ => bail!("scope must be read, write or none"),
+            };
+            client.post(&format!("/api/sessions/{session}/grants"), json!({ "agent": agent, "scope": scope })).await?;
+            println!("agent of {agent} -> {session}: {scope}");
+        }
         Cmd::Ls => {
             let v = client.get("/api/sessions").await?;
             for s in v["sessions"].as_array().into_iter().flatten() {
@@ -167,14 +321,17 @@ async fn main() -> Result<()> {
         }
         Cmd::Run { detach, title, mut command } => {
             if is_claude(&command) {
-                command.push("--settings".into());
-                command.push(claude_hook_settings()?);
+                if !command.iter().any(|a| a == "--settings") {
+                    command.push("--settings".into());
+                    command.push(claude_hook_settings()?);
+                }
+                if !command.iter().any(|a| a == "--mcp-config") {
+                    command.push("--mcp-config".into());
+                    command.push(claude_mcp_config()?);
+                }
             }
             let (cols, rows) = crossterm::terminal::size().unwrap_or((120, 32));
-            let mut env: HashMap<String, String> = HashMap::new();
-            if let Some(t) = &client.token {
-                env.insert("ALMIGHTY_TOKEN".into(), t.clone());
-            }
+            let env: HashMap<String, String> = HashMap::new();
             let cwd = std::env::current_dir()?.to_string_lossy().into_owned();
             let s = client
                 .post(

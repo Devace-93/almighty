@@ -76,8 +76,8 @@ async fn call_tool(client: &Client, name: &str, args: &Value) -> Result<Value> {
         "terminal_list" => client.get("/api/sessions").await,
         "terminal_create" => client.post("/api/sessions", args.clone()).await,
         "terminal_read" => client.get(&path("/screen")).await,
-        "terminal_send_text" => client.post(&path("/input"), json!({ "text": args["text"], "actor": "agent" })).await,
-        "terminal_send_keys" => client.post(&path("/input"), json!({ "keys": args["keys"], "actor": "agent" })).await,
+        "terminal_send_text" => client.post(&path("/input"), json!({ "text": args["text"] })).await,
+        "terminal_send_keys" => client.post(&path("/input"), json!({ "keys": args["keys"] })).await,
         "terminal_wait" => {
             let mut body = json!({ "pattern": args["pattern"], "idle_ms": args["idle_ms"] });
             if let Some(t) = args["timeout_ms"].as_u64() {

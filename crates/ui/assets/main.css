@@ -8,6 +8,9 @@
   --ok: #7fc98f;
   --term-bg: #101216;
   --term-fg: #d7dae0;
+  --mark-from: #4C8DFF;
+  --mark-to: #9A6BFF;
+  --mark-cursor: #FFC83D;
   --cell-w: 7.83px;
   --cell-h: 17px;
   color-scheme: dark;
@@ -22,6 +25,10 @@
     --muted: #5d6470;
     --accent: #2f5fd0;
     --ok: #2f8f4a;
+    /* Deeper tones: the bright yellow has no contrast on white. */
+    --mark-from: #2457D6;
+    --mark-to: #6B3FD4;
+    --mark-cursor: #C98A00;
     color-scheme: light;
   }
 }
@@ -322,3 +329,65 @@ span.link { cursor: pointer; text-decoration: underline; }
     font-size: 16px; /* below 16px mobile browsers zoom the page on focus */
   }
 }
+
+/* Sign-in and workspace switcher */
+.connect { display: flex; min-height: 100%; padding: 16px; }
+
+.connect-card {
+  margin: auto;
+  width: min(420px, 100%);
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.connect-card h1 { margin: 0; font-size: 20px; }
+.connect-card .hint { padding: 0; margin: 0; }
+.connect-card label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted); }
+
+.connect-card input {
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--fg);
+  font-size: 16px;
+}
+
+.connect-card .error { margin: 0; color: #d06060; font-size: 13px; }
+.connect-card .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+
+.primary {
+  padding: 8px 16px;
+  border: 0;
+  border-radius: 6px;
+  background: var(--accent);
+  color: #fff;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.primary:disabled { opacity: 0.6; cursor: default; }
+
+.workspace { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 12px 10px; }
+.workspace .toggle { flex: 1; }
+
+.workspace select {
+  flex: 1 1 100%;
+  min-width: 0;
+  padding: 4px 6px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+  font-size: 13px;
+}
+
+/* Wordmark: the mark replaces "al" and touches "mighty", no gap. */
+.brand { display: inline-flex; align-items: baseline; gap: 0; font-weight: 700; letter-spacing: 0.01em; }
+.brand-mark { flex: none; height: 0.8em; width: auto; margin-right: 0.05em; }
