@@ -1,0 +1,10 @@
+#!/bin/sh
+# Runs the hook of the same name from .local/hooks/ when one exists, so
+# personal or machine-specific checks stay out of the repository.
+# Enable with: git config core.hooksPath tools/hooks
+hook=$(basename "$0")
+root=$(git rev-parse --show-toplevel) || exit 0
+if [ -x "$root/.local/hooks/$hook" ]; then
+  exec "$root/.local/hooks/$hook" "$@"
+fi
+exit 0

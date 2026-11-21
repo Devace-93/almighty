@@ -1,0 +1,16 @@
+[workspace]
+resolver = "2"
+members = ["crates/server", "crates/cli"]
+# crates/ui is a separate Dioxus project (wasm/mobile targets); build it with `dx`.
+exclude = ["crates/ui"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }

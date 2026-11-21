@@ -1,0 +1,12 @@
+//! almighty server: terminal sessions, agent tree, control API.
+pub mod api;
+pub mod hooks;
+pub mod keys;
+pub mod session;
+
+pub use api::{router, serve, AppState, Config};
+
+/// The user's home directory on Unix (`HOME`) and Windows (`USERPROFILE`).
+pub fn home_dir() -> Option<String> {
+    std::env::var("HOME").ok().or_else(|| std::env::var("USERPROFILE").ok()).filter(|h| !h.is_empty())
+}

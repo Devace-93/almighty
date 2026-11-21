@@ -1,0 +1,324 @@
+:root {
+  --bg: #14161a;
+  --panel: #1b1e24;
+  --line: #2a2e37;
+  --fg: #d7dae0;
+  --muted: #8b919c;
+  --accent: #7aa2f7;
+  --ok: #7fc98f;
+  --term-bg: #101216;
+  --term-fg: #d7dae0;
+  --cell-w: 7.83px;
+  --cell-h: 17px;
+  color-scheme: dark;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f4f5f7;
+    --panel: #ffffff;
+    --line: #d9dce3;
+    --fg: #1d2129;
+    --muted: #5d6470;
+    --accent: #2f5fd0;
+    --ok: #2f8f4a;
+    color-scheme: light;
+  }
+}
+
+* { box-sizing: border-box; }
+
+html, body, #main {
+  height: 100%;
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 14px/1.4 system-ui, sans-serif;
+}
+
+button, input { font: inherit; color: inherit; }
+
+.app {
+  display: grid;
+  grid-template-columns: 260px minmax(0, 1fr);
+  height: 100%;
+}
+
+.app.with-browser { grid-template-columns: 260px minmax(0, 1fr) minmax(320px, 40%); }
+
+.sidebar {
+  background: var(--panel);
+  border-right: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.sidebar header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px 10px;
+}
+
+.brand { font-weight: 700; letter-spacing: 0.02em; }
+
+.dot { width: 9px; height: 9px; border-radius: 50%; }
+.dot.on { background: var(--ok); }
+.dot.off { background: #d06060; }
+
+.new {
+  margin: 0 12px 10px;
+  padding: 8px 10px;
+  background: transparent;
+  border: 1px dashed var(--line);
+  border-radius: 6px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.new:hover, .row:hover { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+
+.hint { color: var(--muted); padding: 0 16px; font-size: 13px; }
+
+.sessions, .agents { list-style: none; margin: 0; padding: 0; }
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 16px;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  text-align: left;
+}
+
+.row.active { background: color-mix(in srgb, var(--accent) 22%, transparent); }
+.row.agent { padding-left: 28px; font-size: 13px; }
+
+.row .title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row .kind { color: var(--muted); font-size: 12px; }
+
+.state { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.state.running { background: var(--ok); }
+.state.exited, .state.done { background: var(--muted); }
+
+.badge {
+  font-size: 12px;
+  padding: 0 6px;
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+.center { min-width: 0; min-height: 0; display: flex; }
+.empty { margin: auto; color: var(--muted); }
+
+.terminal-panel { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; }
+
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.bar .title { font-weight: 600; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bar .meta { color: var(--muted); font-size: 12px; }
+
+.tag {
+  font-size: 12px;
+  padding: 1px 8px;
+  border-radius: 9px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+}
+
+.toggle {
+  font-size: 12px;
+  padding: 3px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: transparent;
+  cursor: pointer;
+  text-decoration: none;
+  color: inherit;
+  white-space: nowrap;
+}
+
+.toggle.on { border-color: #d0a060; color: #d0a060; }
+
+.terminal {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  padding: 8px;
+  background: var(--term-bg);
+  color: var(--term-fg);
+  outline: none;
+}
+
+.terminal:focus-visible { box-shadow: inset 0 0 0 1px var(--accent); }
+
+.screen {
+  position: relative;
+  font: 13px/var(--cell-h) "JetBrains Mono", "DejaVu Sans Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+  white-space: pre;
+}
+
+.line { height: var(--cell-h); }
+
+.cursor {
+  position: absolute;
+  width: var(--cell-w);
+  height: var(--cell-h);
+  background: color-mix(in srgb, var(--term-fg) 55%, transparent);
+  pointer-events: none;
+}
+
+.link { color: var(--accent); }
+
+.transcript { flex: 1; overflow-y: auto; padding: 12px 16px; }
+
+.msg { margin-bottom: 12px; }
+.msg .who { font-size: 12px; color: var(--muted); }
+.msg pre {
+  margin: 4px 0 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: 13px/1.45 "JetBrains Mono", "DejaVu Sans Mono", monospace;
+}
+.msg.tool_use pre, .msg.tool_result pre { color: var(--muted); }
+
+.browser {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  border-left: 1px solid var(--line);
+}
+
+.browser input {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+}
+
+.browser iframe { flex: 1; border: 0; background: #fff; }
+
+/* Light layout for phones: one column, sessions as a strip on top,
+   the side browser covers the terminal. */
+@media (max-width: 720px) {
+  .app, .app.with-browser {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+  .sidebar { border-right: 0; border-bottom: 1px solid var(--line); max-height: 38vh; }
+  .sidebar header { padding: 10px 16px 6px; }
+  .browser { position: fixed; inset: 0; background: var(--bg); border: 0; z-index: 10; }
+}
+
+/* The terminal is always dark, so its links do not follow the page theme. */
+.terminal .link { color: #8fb4ff; }
+
+span.link { cursor: pointer; text-decoration: underline; }
+.page-slot { flex: 1; min-height: 0; background: var(--bg); }
+
+/* Side browser: tabs and icon buttons */
+.tabs {
+  display: flex;
+  gap: 2px;
+  padding: 6px 8px 0;
+  background: var(--panel);
+  overflow-x: auto;
+}
+
+.tab {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  max-width: 200px;
+  border: 1px solid var(--line);
+  border-bottom: 0;
+  border-radius: 6px 6px 0 0;
+  background: var(--bg);
+  opacity: 0.7;
+}
+
+.tab.active { opacity: 1; background: var(--panel); box-shadow: inset 0 2px 0 var(--accent); }
+
+.tab-label {
+  min-width: 0;
+  padding: 5px 4px 5px 10px;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex: none;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.icon-button.small { width: 22px; height: 22px; border: 0; margin-right: 2px; }
+.icon-button:hover { background: color-mix(in srgb, var(--accent) 16%, transparent); }
+.icon-button:focus-visible, .tab-label:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+.browser iframe[hidden] { display: none; }
+
+/* Touch input row: only where there is no physical keyboard to rely on. */
+.touch-keys { display: none; }
+
+/* Some webviews report a fine pointer on phones, so width counts too. */
+@media (any-pointer: coarse), (max-width: 720px) {
+  .touch-keys {
+    display: flex;
+    gap: 6px;
+    padding: 6px 8px;
+    background: var(--panel);
+    border-top: 1px solid var(--line);
+    overflow-x: auto;
+  }
+  .touch-keys button {
+    flex: none;
+    min-width: 44px;
+    min-height: 40px;
+    padding: 0 10px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--bg);
+  }
+  .touch-input {
+    flex: 1;
+    min-width: 120px;
+    min-height: 40px;
+    padding: 0 10px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--bg);
+    font-size: 16px; /* below 16px mobile browsers zoom the page on focus */
+  }
+}

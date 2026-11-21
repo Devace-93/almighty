@@ -1,0 +1,524 @@
+//! almighty client (milestone-0 spike): session list with agent tree, a
+//! terminal panel drawn from the server's grid, and a side browser panel.
+
+// Windows release builds are GUI programs: no console window next to the app.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
+mod browser;
+mod model;
+mod net;
+#[cfg(all(feature = "desktop", target_os = "linux"))]
+mod sidebrowser;
+#[cfg(all(feature = "desktop", target_os = "windows"))]
+#[path = "sidebrowser_windows.rs"]
+mod sidebrowser;
+
+/// Whether this build can show a page next to the terminal. The browser
+/// build uses an iframe; Linux and Windows desktop use native webviews.
+/// Elsewhere links go to the system browser until a child webview exists.
+pub(crate) const HAS_SIDE_BROWSER: bool = cfg!(target_arch = "wasm32")
+    || cfg!(all(feature = "desktop", any(target_os = "linux", target_os = "windows")));
+
+/// Opens a URL outside the app on native desktop builds.
+pub(crate) fn open_external(_url: &str) {
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))]
+    {
+        let _ = webbrowser::open(_url);
+    }
+}
+
+use dioxus::prelude::*;
+use futures_channel::mpsc::UnboundedReceiver;
+use serde_json::{json, Value};
+
+use browser::{Browser, BrowserPanel, LinkedText};
+use model::{split_links, AgentNode, Grid, Piece, Run, SessionInfo, TranscriptLine};
+
+const CSS: Asset = asset!("/assets/main.css");
+
+/// Approximate cell size of the terminal font (13px monospace). Good enough
+/// for the spike; the real client must measure the font.
+const CELL_W: f64 = 7.83;
+const CELL_H: f64 = 17.0;
+
+#[derive(Clone, PartialEq)]
+enum View {
+    Terminal(String),
+    Agent(String, String),
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct Shell {
+    pub(crate) server: Signal<String>,
+    view: Signal<Option<View>>,
+    pub(crate) browser: Signal<Browser>,
+}
+
+fn main() {
+    // Desktop windows get the app's name instead of the default "Dioxus App".
+    #[cfg(all(feature = "desktop", not(any(target_os = "android", target_os = "ios"))))]
+    {
+        use dioxus::desktop::{Config, WindowBuilder};
+        let window = WindowBuilder::new().with_title("almighty");
+        // No default "Window / Edit" menu bar: the app has no use for it yet.
+        let config = Config::new().with_window(window).with_menu(None);
+        dioxus::LaunchBuilder::new().with_cfg(config).launch(App);
+        return;
+    }
+    #[allow(unreachable_code)]
+    dioxus::launch(App);
+}
+
+pub(crate) async fn api_get(server: &str, path: &str) -> Option<Value> {
+    reqwest::get(format!("{server}{path}")).await.ok()?.json().await.ok()
+}
+
+async fn api_post(server: &str, path: &str, body: Value) -> Option<Value> {
+    reqwest::Client::new().post(format!("{server}{path}")).json(&body).send().await.ok()?.json().await.ok()
+}
+
+#[component]
+fn App() -> Element {
+    let shell = Shell {
+        server: use_signal(net::default_server),
+        view: use_signal(|| None),
+        browser: use_signal(Browser::default),
+    };
+    use_context_provider(|| shell);
+    let view = shell.view;
+    let browser = shell.browser;
+
+    rsx! {
+        document::Stylesheet { href: CSS }
+        div { class: if browser().visible() { "app with-browser" } else { "app" },
+            Sidebar {}
+            main { class: "center",
+                match view() {
+                    Some(View::Terminal(id)) => rsx! { TerminalView { key: "{id}", id } },
+                    Some(View::Agent(sid, aid)) => rsx! { AgentView { key: "{sid}-{aid}", session: sid, agent: aid } },
+                    None => rsx! { div { class: "empty", "Pick a session, or start a new terminal." } },
+                }
+            }
+            if browser().visible() {
+                BrowserPanel {}
+            }
+        }
+    }
+}
+
+#[component]
+fn Sidebar() -> Element {
+    let shell = use_context::<Shell>();
+    let mut view = shell.view;
+    let mut sessions = use_signal(Vec::<SessionInfo>::new);
+    let mut agents = use_signal(Vec::<AgentNode>::new);
+    let mut online = use_signal(|| true);
+
+    // Poll the server; a push channel replaces this in milestone 1.
+    use_future(move || async move {
+        loop {
+            let server = shell.server.peek().clone();
+            match api_get(&server, "/api/sessions").await {
+                Some(v) => {
+                    online.set(true);
+                    let list: Vec<SessionInfo> = serde_json::from_value(v["sessions"].clone()).unwrap_or_default();
+                    if *sessions.peek() != list {
+                        sessions.set(list);
+                    }
+                }
+                None => online.set(false),
+            }
+            let current = match &*view.peek() {
+                Some(View::Terminal(id)) | Some(View::Agent(id, _)) => Some(id.clone()),
+                None => None,
+            };
+            let list: Vec<AgentNode> = match current {
+                Some(id) => api_get(&server, &format!("/api/sessions/{id}/agents"))
+                    .await
+                    .and_then(|v| serde_json::from_value(v["agents"].clone()).ok())
+                    .unwrap_or_default(),
+                None => Vec::new(),
+            };
+            if *agents.peek() != list {
+                agents.set(list);
+            }
+            net::sleep_ms(1200).await;
+        }
+    });
+
+    let new_terminal = move |_| async move {
+        let server = shell.server.peek().clone();
+        let body = json!({ "command": ["bash"], "cols": 100, "rows": 30 });
+        if let Some(v) = api_post(&server, "/api/sessions", body).await {
+            if let Some(id) = v["id"].as_str() {
+                view.set(Some(View::Terminal(id.to_string())));
+            }
+        }
+    };
+
+    let selected = match view() {
+        Some(View::Terminal(id)) | Some(View::Agent(id, _)) => Some(id),
+        None => None,
+    };
+    let selected_agent = match view() {
+        Some(View::Agent(_, a)) => Some(a),
+        _ => None,
+    };
+
+    rsx! {
+        nav { class: "sidebar",
+            header {
+                span { class: "brand", "almighty" }
+                span { class: if online() { "dot on" } else { "dot off" }, title: "{shell.server}" }
+            }
+            button { class: "new", onclick: new_terminal, "+ New terminal" }
+            if !online() {
+                p { class: "hint", "Server not reachable at {shell.server}" }
+            }
+            ul { class: "sessions",
+                for s in sessions() {
+                    li { key: "{s.id}",
+                        button {
+                            class: if selected.as_deref() == Some(s.id.as_str()) && selected_agent.is_none() { "row active" } else { "row" },
+                            onclick: {
+                                let id = s.id.clone();
+                                move |_| view.set(Some(View::Terminal(id.clone())))
+                            },
+                            span { class: if s.exited { "state exited" } else { "state running" } }
+                            span { class: "title", "{s.title}" }
+                            if s.agents > 0 {
+                                span { class: "badge", "{s.agents}" }
+                            }
+                        }
+                        if selected.as_deref() == Some(s.id.as_str()) {
+                            ul { class: "agents",
+                                for a in agents() {
+                                    li { key: "{a.agent_id}",
+                                        button {
+                                            class: if selected_agent.as_deref() == Some(a.agent_id.as_str()) { "row agent active" } else { "row agent" },
+                                            style: if a.parent.is_some() { "padding-left: 40px" } else { "" },
+                                            onclick: {
+                                                let sid = s.id.clone();
+                                                let aid = a.agent_id.clone();
+                                                move |_| view.set(Some(View::Agent(sid.clone(), aid.clone())))
+                                            },
+                                            span { class: if a.status == "running" { "state running" } else { "state done" } }
+                                            span { class: "title",
+                                                {a.description.clone().unwrap_or_else(|| a.agent_type.clone())}
+                                            }
+                                            span { class: "kind", "{a.agent_type}" }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Browser key event -> key name understood by the server's key encoder.
+fn key_name(e: &KeyboardEvent) -> Option<String> {
+    let m = e.modifiers();
+    let (ctrl, alt, shift) = (m.contains(Modifiers::CONTROL), m.contains(Modifiers::ALT), m.contains(Modifiers::SHIFT));
+    let (base, printable) = match e.key() {
+        Key::Character(c) => (c, true),
+        Key::Enter => ("Enter".to_string(), false),
+        Key::Tab => ("Tab".to_string(), false),
+        Key::Escape => ("Esc".to_string(), false),
+        Key::Backspace => ("Backspace".to_string(), false),
+        Key::Delete => ("Delete".to_string(), false),
+        Key::Insert => ("Insert".to_string(), false),
+        Key::ArrowUp => ("Up".to_string(), false),
+        Key::ArrowDown => ("Down".to_string(), false),
+        Key::ArrowLeft => ("Left".to_string(), false),
+        Key::ArrowRight => ("Right".to_string(), false),
+        Key::Home => ("Home".to_string(), false),
+        Key::End => ("End".to_string(), false),
+        Key::PageUp => ("PageUp".to_string(), false),
+        Key::PageDown => ("PageDown".to_string(), false),
+        Key::F1 => ("F1".to_string(), false),
+        Key::F2 => ("F2".to_string(), false),
+        Key::F3 => ("F3".to_string(), false),
+        Key::F4 => ("F4".to_string(), false),
+        Key::F5 => ("F5".to_string(), false),
+        Key::F6 => ("F6".to_string(), false),
+        Key::F7 => ("F7".to_string(), false),
+        Key::F8 => ("F8".to_string(), false),
+        Key::F9 => ("F9".to_string(), false),
+        Key::F10 => ("F10".to_string(), false),
+        Key::F11 => ("F11".to_string(), false),
+        Key::F12 => ("F12".to_string(), false),
+        _ => return None,
+    };
+    let base = if base == " " { "Space".to_string() } else { base };
+    let mut name = String::new();
+    if ctrl {
+        name.push_str("C-");
+    }
+    if alt {
+        name.push_str("M-");
+    }
+    // Shift is already folded into printable characters ("A", "!").
+    if shift && !printable {
+        name.push_str("S-");
+    }
+    name.push_str(&base);
+    Some(name)
+}
+
+#[component]
+fn TerminalView(id: String) -> Element {
+    let shell = use_context::<Shell>();
+    let mut grid = use_signal(Grid::default);
+    let mut connected = use_signal(|| false);
+
+    let ws_id = id.clone();
+    let tx = use_coroutine(move |mut rx: UnboundedReceiver<String>| {
+        let id = ws_id.clone();
+        async move {
+            let url = format!("{}/api/sessions/{id}/grid", shell.server.peek().replacen("http", "ws", 1));
+            connected.set(true);
+            net::run_ws(url, &mut rx, move |text| {
+                let Ok(v) = serde_json::from_str::<Value>(&text) else { return };
+                if v["type"] == "full" {
+                    if let Ok(g) = serde_json::from_value::<Grid>(v["grid"].clone()) {
+                        grid.set(g);
+                    }
+                } else if v["type"] == "patch" {
+                    let mut g = grid.write();
+                    for line in v["lines"].as_array().into_iter().flatten() {
+                        let i = line["i"].as_u64().unwrap_or(u64::MAX) as usize;
+                        if let (Some(slot), Ok(runs)) =
+                            (g.lines.get_mut(i), serde_json::from_value::<Vec<Run>>(line["runs"].clone()))
+                        {
+                            *slot = runs;
+                        }
+                    }
+                    g.cursor_row = v["cursor_row"].as_u64().unwrap_or(0) as u16;
+                    g.cursor_col = v["cursor_col"].as_u64().unwrap_or(0) as u16;
+                    g.cursor_visible = v["cursor_visible"].as_bool().unwrap_or(true);
+                    g.title = v["title"].as_str().unwrap_or("").to_string();
+                    g.exited = v["exited"].as_bool().unwrap_or(false);
+                    g.locked = v["locked"].as_bool().unwrap_or(false);
+                }
+            })
+            .await;
+            connected.set(false);
+        }
+    });
+
+    let onkeydown = move |e: KeyboardEvent| {
+        // Leave browser shortcuts such as Ctrl+Shift+I and Ctrl+R alone.
+        let m = e.modifiers();
+        if m.contains(Modifiers::META) || (m.contains(Modifiers::CONTROL) && m.contains(Modifiers::SHIFT)) {
+            return;
+        }
+        if let Some(name) = key_name(&e) {
+            e.prevent_default();
+            tx.send(json!({ "type": "input", "keys": [name] }).to_string());
+        }
+    };
+
+    let g = grid();
+    let cursor_style = format!(
+        "left: calc({} * var(--cell-w)); top: calc({} * var(--cell-h));",
+        g.cursor_col, g.cursor_row
+    );
+    let locked = g.locked;
+
+    rsx! {
+        section { class: "terminal-panel",
+            header { class: "bar",
+                span { class: "title", if g.title.is_empty() { "{id}" } else { "{g.title}" } }
+                span { class: "meta", "{g.cols}×{g.rows}" }
+                if g.exited {
+                    span { class: "tag", "exited" }
+                }
+                if !connected() {
+                    span { class: "tag", "disconnected" }
+                }
+                button {
+                    class: if locked { "toggle on" } else { "toggle" },
+                    title: "When locked, agents cannot type into this session",
+                    onclick: move |_| tx.send(json!({ "type": "lock", "locked": !locked }).to_string()),
+                    if locked { "Agents locked out" } else { "Agents allowed" }
+                }
+            }
+            div {
+                class: "terminal",
+                tabindex: "0",
+                autofocus: true,
+                onkeydown,
+                onresize: move |e: ResizeEvent| {
+                    if let Ok(size) = e.get_content_box_size() {
+                        let cols = ((size.width - 16.0) / CELL_W).floor().clamp(20.0, 400.0) as u16;
+                        let rows = ((size.height - 16.0) / CELL_H).floor().clamp(5.0, 200.0) as u16;
+                        let current = grid.peek();
+                        if cols != current.cols || rows != current.rows {
+                            tx.send(json!({ "type": "resize", "cols": cols, "rows": rows }).to_string());
+                        }
+                    }
+                },
+                div { class: "screen",
+                    for (i, line) in g.lines.iter().enumerate() {
+                        div { key: "{i}", class: "line",
+                            for run in line.iter() {
+                                RunSpan { run: run.clone() }
+                            }
+                        }
+                    }
+                    if g.cursor_visible && !g.exited {
+                        span { class: "cursor", style: "{cursor_style}" }
+                    }
+                }
+            }
+            TouchKeys { send: move |msg: String| tx.send(msg) }
+        }
+    }
+}
+
+/// What to type so that a field that held `prev` ends up holding `next`:
+/// how many characters to erase, then the text to add. On-screen keyboards
+/// rewrite the word being composed, so plain "append" is not enough.
+fn typing_delta(prev: &str, next: &str) -> (usize, String) {
+    let common = prev.chars().zip(next.chars()).take_while(|(a, b)| a == b).count();
+    (prev.chars().count() - common, next.chars().skip(common).collect())
+}
+
+/// Input row for touch devices (shown only for coarse pointers): a real text
+/// field, because a focusable `div` does not raise the on-screen keyboard,
+/// plus the keys such keyboards lack.
+#[component]
+fn TouchKeys(send: EventHandler<String>) -> Element {
+    // What the field held at the last input event. Never rendered: the field
+    // is uncontrolled, because on native webviews events cross a process
+    // boundary and writing a stale value back would drop characters typed in
+    // between.
+    let mut prev = use_signal(String::new);
+    let key = move |name: &'static str| {
+        move |_| send.call(json!({ "type": "input", "keys": [name] }).to_string())
+    };
+    rsx! {
+        div { class: "touch-keys",
+            button { r#type: "button", onclick: key("Esc"), "Esc" }
+            button { r#type: "button", onclick: key("Tab"), "Tab" }
+            button { r#type: "button", onclick: key("C-c"), "Ctrl-C" }
+            button { r#type: "button", aria_label: "Up", onclick: key("Up"), "↑" }
+            button { r#type: "button", aria_label: "Down", onclick: key("Down"), "↓" }
+            input {
+                r#type: "text",
+                id: "touch-input",
+                class: "touch-input",
+                placeholder: "Type here",
+                aria_label: "Terminal input",
+                autocapitalize: "off",
+                autocomplete: "off",
+                spellcheck: false,
+                oninput: move |e| {
+                    let next = e.value();
+                    let (erase, add) = typing_delta(&prev.peek(), &next);
+                    if erase > 0 {
+                        send.call(json!({ "type": "input", "keys": vec!["Backspace"; erase] }).to_string());
+                    }
+                    if !add.is_empty() {
+                        send.call(json!({ "type": "input", "text": add }).to_string());
+                    }
+                    prev.set(next);
+                },
+                onkeydown: move |e: KeyboardEvent| match e.key() {
+                    Key::Enter => {
+                        e.prevent_default();
+                        send.call(json!({ "type": "input", "keys": ["Enter"] }).to_string());
+                        // Empty the field without touching its focus. `prev` is
+                        // reset only once the field is really empty, so keys
+                        // typed in between are still diffed against the old text.
+                        spawn(async move {
+                            let _ = net::clear_field("touch-input").await;
+                            prev.set(String::new());
+                        });
+                    }
+                    Key::Backspace if prev.peek().is_empty() => {
+                        send.call(json!({ "type": "input", "keys": ["Backspace"] }).to_string());
+                    }
+                    _ => {}
+                },
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::typing_delta;
+
+    #[test]
+    fn deltas() {
+        assert_eq!(typing_delta("", "h"), (0, "h".into()));
+        assert_eq!(typing_delta("hel", "hell"), (0, "l".into()));
+        assert_eq!(typing_delta("hell", "hel"), (1, String::new()));
+        // Autocorrect replaces the word being composed.
+        assert_eq!(typing_delta("teh", "the "), (2, "he ".into()));
+        assert_eq!(typing_delta("ñu", "ñus"), (0, "s".into()));
+        assert_eq!(typing_delta("abc", ""), (3, String::new()));
+    }
+}
+
+#[component]
+fn RunSpan(run: Run) -> Element {
+    let css = run.css();
+    // Most runs have no dot at all: skip the link scan for them.
+    if !run.t.contains('.') {
+        return rsx! { span { style: "{css}", "{run.t}" } };
+    }
+    let pieces = split_links(&run.t);
+    if matches!(pieces.as_slice(), [] | [Piece::Text(_)]) {
+        return rsx! { span { style: "{css}", "{run.t}" } };
+    }
+    rsx! { span { style: "{css}", LinkedText { pieces } } }
+}
+
+#[component]
+fn AgentView(session: String, agent: String) -> Element {
+    let shell = use_context::<Shell>();
+    let mut lines = use_signal(Vec::<TranscriptLine>::new);
+    let path = format!("/api/sessions/{session}/agents/{agent}/transcript");
+
+    use_future(move || {
+        let path = path.clone();
+        async move {
+            loop {
+                let server = shell.server.peek().clone();
+                if let Some(v) = api_get(&server, &path).await {
+                    let list: Vec<TranscriptLine> = serde_json::from_value(v["lines"].clone()).unwrap_or_default();
+                    if *lines.peek() != list {
+                        lines.set(list);
+                    }
+                }
+                net::sleep_ms(1500).await;
+            }
+        }
+    });
+
+    rsx! {
+        section { class: "terminal-panel",
+            header { class: "bar",
+                span { class: "title", "Subagent {agent}" }
+                span { class: "tag", "read-only" }
+            }
+            div { class: "transcript",
+                if lines().is_empty() {
+                    p { class: "hint", "No transcript yet." }
+                }
+                for (i, l) in lines().into_iter().enumerate() {
+                    div { key: "{i}", class: "msg {l.role} {l.kind}",
+                        span { class: "who", "{l.role} · {l.kind}" }
+                        pre { "{l.text}" }
+                    }
+                }
+            }
+        }
+    }
+}

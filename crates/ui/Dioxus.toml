@@ -1,0 +1,5 @@
+[application]
+name = "almighty"
+
+[web.app]
+title = "almighty"
