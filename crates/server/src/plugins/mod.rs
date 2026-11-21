@@ -77,6 +77,7 @@ impl Loaded {
             "poll_seconds": self.manifest.poll_seconds(),
             "panels": self.manifest.panels,
             "commands": self.manifest.commands,
+            "review_kinds": self.manifest.review.as_ref().map(|r| r.kinds.clone()).unwrap_or_default(),
             "secrets_set": secrets_set,
             "last_poll": status.last_poll,
             "last_error": status.last_error,

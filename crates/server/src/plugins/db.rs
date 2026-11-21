@@ -4,7 +4,7 @@
 use anyhow::Result;
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::json;
 
 use crate::session::now_secs;
 use crate::store::Store;

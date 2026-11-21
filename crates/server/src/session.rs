@@ -43,6 +43,8 @@ pub struct SessionInfo {
     pub created_by: String,
     /// Still running, but taken out of the default session list.
     pub background: bool,
+    /// How many inline images the session has shown so far.
+    pub media: u64,
 }
 
 /// Who started a session; decides which agent may drive it.
@@ -232,7 +234,9 @@ impl Session {
                         Ok(0) | Err(_) => break,
                         Ok(n) => {
                             let mut parser = s.parser.lock().unwrap();
+                            let media_before = parser.callbacks().media_seq;
                             parser.process(&buf[..n]);
+                            let new_media = parser.callbacks().media_seq != media_before;
                             let replies = std::mem::take(&mut parser.callbacks_mut().replies);
                             let _ = s.out_tx.send(buf[..n].to_vec());
                             drop(parser);
@@ -242,6 +246,9 @@ impl Session {
                                 }
                             }
                             s.bump();
+                            if new_media {
+                                (s.on_change)();
+                            }
                         }
                     }
                 }
@@ -297,7 +304,23 @@ impl Session {
             agents: self.agents.lock().unwrap().len(),
             created_by: self.created_by.label(),
             background: self.background.load(Ordering::SeqCst),
+            media: self.parser.lock().unwrap().callbacks().media_seq,
         }
+    }
+
+    /// Inline images, oldest first: id, name, type and size.
+    pub fn media_list(&self) -> Vec<serde_json::Value> {
+        let parser = self.parser.lock().unwrap();
+        parser
+            .callbacks()
+            .media
+            .iter()
+            .map(|m| serde_json::json!({ "id": m.id, "name": m.name, "mime": m.mime, "size": m.data.len() }))
+            .collect()
+    }
+
+    pub fn media_get(&self, id: u64) -> Option<Media> {
+        self.parser.lock().unwrap().callbacks().media.iter().find(|m| m.id == id).cloned()
     }
 
     pub fn background(&self) -> bool {
@@ -502,13 +525,73 @@ impl Session {
 #[derive(Debug, Default)]
 pub struct TermEvents {
     pub title: String,
+    /// Images the application printed inline (iTerm2 `OSC 1337 ; File=`).
+    pub media: Vec<Media>,
+    media_seq: u64,
     /// Replies owed to the application (device status reports). A headless
     /// emulator has to answer these itself: ConPTY on Windows opens every
     /// session with `ESC[6n` and stalls until it gets the cursor position.
     pub replies: Vec<u8>,
 }
 
+/// An image printed into the terminal, kept for clients in rich mode.
+#[derive(Debug, Clone)]
+pub struct Media {
+    pub id: u64,
+    pub name: String,
+    pub mime: &'static str,
+    pub data: Arc<Vec<u8>>,
+}
+
+const MAX_MEDIA: usize = 40;
+const MAX_MEDIA_BYTES: usize = 8 * 1024 * 1024;
+
+/// Only real images are kept; the type comes from the bytes, not from the name.
+fn image_type(data: &[u8]) -> Option<&'static str> {
+    match data {
+        [0x89, b'P', b'N', b'G', ..] => Some("image/png"),
+        [0xff, 0xd8, 0xff, ..] => Some("image/jpeg"),
+        [b'G', b'I', b'F', b'8', ..] => Some("image/gif"),
+        [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'E', b'B', b'P', ..] => Some("image/webp"),
+        _ => None,
+    }
+}
+
+impl TermEvents {
+    /// `1337 ; File=name=<b64>;size=N;inline=1:<base64 data>`.
+    fn inline_file(&mut self, params: &[&[u8]]) {
+        use base64::Engine;
+        let joined = params[1..].join(&b';');
+        let Some(rest) = joined.strip_prefix(b"File=") else { return };
+        let Some(colon) = rest.iter().position(|b| *b == b':') else { return };
+        let (args, data) = (String::from_utf8_lossy(&rest[..colon]).to_string(), &rest[colon + 1..]);
+        if !args.split(';').any(|a| a == "inline=1") || data.len() > MAX_MEDIA_BYTES * 4 / 3 + 16 {
+            return;
+        }
+        let engine = base64::engine::general_purpose::STANDARD;
+        let Ok(bytes) = engine.decode(data) else { return };
+        let Some(mime) = image_type(&bytes) else { return };
+        let name = args
+            .split(';')
+            .find_map(|a| a.strip_prefix("name="))
+            .and_then(|n| engine.decode(n).ok())
+            .map(|n| String::from_utf8_lossy(&n).chars().filter(|c| !c.is_control()).take(120).collect())
+            .unwrap_or_else(|| "image".to_string());
+        self.media_seq += 1;
+        if self.media.len() == MAX_MEDIA {
+            self.media.remove(0);
+        }
+        self.media.push(Media { id: self.media_seq, name, mime, data: Arc::new(bytes) });
+    }
+}
+
 impl vt100::Callbacks for TermEvents {
+    fn unhandled_osc(&mut self, _: &mut vt100::Screen, params: &[&[u8]]) {
+        if params.len() >= 2 && params[0] == b"1337" {
+            self.inline_file(params);
+        }
+    }
+
     fn set_window_title(&mut self, _: &mut vt100::Screen, title: &[u8]) {
         self.title = String::from_utf8_lossy(title).chars().take(200).collect();
     }

@@ -3,8 +3,6 @@
 //! may refine the result. What a person changes by hand is kept and feeds
 //! later decisions.
 
-pub mod llm;
-
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -496,7 +494,7 @@ impl Triage {
     /// Blocking (the LLM call): run it off the async threads.
     pub fn process(&self, item_id: &str) {
         let Some(item) = self.store.item(item_id) else { return };
-        let provider = llm::Provider::load(&self.data_dir);
+        let provider = crate::llm::Provider::load(&self.data_dir);
         for user in self.store.list_users().into_iter().filter(|u| u.role >= Role::Member) {
             let before = self.store.triage_get(&item.id, user.id);
             let mut row = self.ensure(user.id, &user.name, &item);

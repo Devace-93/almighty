@@ -312,7 +312,18 @@ async fn github_connector() {
     let port = http_server(move |request| {
         seen2.lock().unwrap().push(request.to_string());
         let path = request.split_whitespace().nth(1).unwrap_or("");
-        if path.starts_with("/repos/acme/app/pulls") {
+        if path.starts_with("/repos/acme/app/pulls/1/files") {
+            (200, json!([
+                { "filename": "src/auth/login.rs", "status": "modified", "additions": 260, "deletions": 10, "patch": "@@ -1 +1 @@\n-old\n+new" },
+                { "filename": "README.md", "status": "modified", "additions": 3, "deletions": 0, "patch": "+docs" },
+            ]).to_string())
+        } else if path.starts_with("/repos/acme/app/pulls/1") {
+            let mut one = pr(1, "First", false);
+            one["changed_files"] = json!(5);
+            one["base"] = json!({ "ref": "main" });
+            one["head"] = json!({ "ref": "login" });
+            (200, one.to_string())
+        } else if path.starts_with("/repos/acme/app/pulls") {
             (200, listed2.lock().unwrap().to_string())
         } else if path.starts_with("/search/issues") {
             (200, json!({ "items": [pr(7, "Please review", false)] }).to_string())
@@ -366,6 +377,23 @@ async fn github_connector() {
         assert_eq!(seen.len(), 1, "{seen:?}");
         assert!(!seen[0].to_ascii_lowercase().contains("authorization"));
     }
+
+    // Review: the plugin lists the files, the server maps the risk.
+    let (status, review) = call(&router, "GET", &format!("/api/review/{}", first["id"].as_str().unwrap()), &admin, None).await;
+    assert_eq!(status, StatusCode::OK, "{review}");
+    assert_eq!(review["change"]["head"], "login");
+    assert_eq!(review["risks"][0]["path"], "src/auth/login.rs");
+    assert_eq!(review["risks"][0]["level"], "high");
+    assert_eq!(review["risks"][1]["level"], "low");
+    assert_eq!(review["totals"]["files"], 2);
+    let notes = review["notes"].to_string();
+    assert!(notes.contains("no test file") && notes.contains("incomplete"), "{notes}");
+    assert_eq!(call(&router, "GET", "/api/review/it_nope", &admin, None).await.0, StatusCode::NOT_FOUND);
+    // No model configured: the summary says so instead of failing obscurely.
+    let (status, out) = call(&router, "POST", &format!("/api/review/{}/summary", first["id"].as_str().unwrap()), &admin, None).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{out}");
+    seen.lock().unwrap().clear();
+    call(&router, "POST", &poll, &admin, None).await;
 
     // A pull request that is no longer listed is closed; with a token, review requests arrive.
     *listed.lock().unwrap() = json!([pr(1, "First, renamed", false)]);

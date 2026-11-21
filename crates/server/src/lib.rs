@@ -2,7 +2,9 @@
 pub mod api;
 pub mod hooks;
 pub mod keys;
+pub mod llm;
 pub mod plugins;
+pub mod review;
 pub mod session;
 pub mod store;
 pub mod triage;

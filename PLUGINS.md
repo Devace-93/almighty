@@ -48,6 +48,11 @@ type = "declarative"          # "declarative" | "web"
 [[commands]]
 id = "flows.run"
 title = "Run workflow…"
+
+[review]                      # optional: items of these kinds open in the review view
+command = "github.review"     # a declared command; gets {external_id, url, thread}
+kinds = ["pull_request"]      # and returns {title, body, author, url, base, head, truncated,
+                              #   files: [{path, status, additions, deletions, patch}]}
 ```
 
 ## Extension points

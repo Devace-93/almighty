@@ -10,6 +10,7 @@ mod inbox;
 mod model;
 mod net;
 mod panel;
+mod review;
 #[cfg(all(feature = "desktop", target_os = "linux"))]
 mod sidebrowser;
 #[cfg(all(feature = "desktop", target_os = "windows"))]
@@ -52,6 +53,8 @@ pub(crate) enum View {
     /// A plugin panel: plugin id, panel id, title.
     Panel(String, String, String),
     Inbox,
+    /// Review of the change behind an item: item id, title.
+    Review(String, String),
 }
 
 #[derive(Clone, Copy)]
@@ -66,6 +69,8 @@ pub(crate) struct Shell {
     pub(crate) plugins_tick: Signal<u32>,
     /// Goes up when the server reports a change in this person's inbox.
     pub(crate) inbox_tick: Signal<u32>,
+    /// Goes up on every event from the server.
+    pub(crate) events_tick: Signal<u32>,
 }
 
 fn main() {
@@ -158,6 +163,7 @@ fn App() -> Element {
         browser: use_signal(Browser::default),
         plugins_tick: use_signal(|| 0u32),
         inbox_tick: use_signal(|| 0u32),
+        events_tick: use_signal(|| 0u32),
     };
     use_context_provider(|| shell);
 
@@ -207,12 +213,14 @@ fn Workbench(on_add: EventHandler<()>) -> Element {
                     Some(View::Agent(sid, aid)) => rsx! { AgentView { key: "{sid}-{aid}", session: sid, agent: aid } },
                     Some(View::Panel(plugin, panel, title)) => rsx! { panel::PanelView { key: "{plugin}/{panel}", plugin, panel, title } },
                     Some(View::Inbox) => rsx! { inbox::InboxView {} },
+                    Some(View::Review(item, title)) => rsx! { review::ReviewView { key: "{item}", item, title } },
                     None => rsx! { div { class: "empty", "Pick a session, or start a new terminal." } },
                 }
             }
             if browser().visible() {
                 BrowserPanel {}
             }
+            review::Explainer {}
         }
     }
 }
@@ -230,6 +238,7 @@ fn Sidebar(on_add: EventHandler<()>) -> Element {
     let mut online = use_signal(|| true);
     let mut plugins_tick = shell.plugins_tick;
     let mut inbox_tick = shell.inbox_tick;
+    let mut events_tick = shell.events_tick;
     let mut inbox_counts = use_signal(|| Value::Null);
 
     use_resource(move || async move {
@@ -262,6 +271,7 @@ fn Sidebar(on_add: EventHandler<()>) -> Element {
             let url = ws_url(&shell.server.peek(), "/api/events");
             net::run_ws(url, &mut rx, move |text| {
                 refresh += 1;
+                events_tick += 1;
                 if text.contains("\"type\":\"plugin") || text.contains("\"type\":\"item\"") {
                     plugins_tick += 1;
                 }
@@ -601,6 +611,22 @@ fn TerminalView(id: String) -> Element {
     let mut cell_w = use_signal(|| CELL_W);
     // Wheel movement not yet turned into whole lines.
     let mut wheel_rest = use_signal(|| 0.0f64);
+    // Rich mode: images the application printed inline.
+    let mut media = use_signal(Vec::<Value>::new);
+    let mut zoomed = use_signal(|| None::<u64>);
+    let media_id = id.clone();
+    use_resource(move || {
+        let path = format!("/api/sessions/{media_id}/media");
+        let _ = (shell.events_tick)();
+        async move {
+            let server = shell.server.peek().clone();
+            let list = api_get(&server, &path).await.and_then(|v| v["media"].as_array().cloned()).unwrap_or_default();
+            if *media.peek() != list {
+                media.set(list);
+            }
+        }
+    });
+    let media_base = format!("{}/api/sessions/{id}/media", shell.server.peek());
 
     let ws_id = id.clone();
     let tx = use_coroutine(move |mut rx: UnboundedReceiver<String>| {
@@ -708,6 +734,25 @@ fn TerminalView(id: String) -> Element {
                     title: "When locked, agents cannot type into this session",
                     onclick: move |_| tx.send(json!({ "type": "lock", "locked": !locked }).to_string()),
                     if locked { "Agents locked out" } else { "Agents allowed" }
+                }
+            }
+            if !media().is_empty() {
+                div { class: if zoomed().is_some() { "media-strip zoomed" } else { "media-strip" }, role: "group", aria_label: "Images shown in this terminal",
+                    for m in media() {
+                        button {
+                            key: "{m[\"id\"]}",
+                            class: if zoomed() == m["id"].as_u64() { "media-thumb active" } else { "media-thumb" },
+                            title: "{m[\"name\"].as_str().unwrap_or(\"image\")}",
+                            onclick: {
+                                let this = m["id"].as_u64();
+                                move |_| zoomed.set(if zoomed() == this { None } else { this })
+                            },
+                            img {
+                                src: "{media_base}/{m[\"id\"]}?token={TOKEN.peek()}",
+                                alt: "{m[\"name\"].as_str().unwrap_or(\"image\")}",
+                            }
+                        }
+                    }
                 }
             }
             div {

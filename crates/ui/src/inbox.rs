@@ -5,7 +5,7 @@ use dioxus::prelude::*;
 use serde_json::{json, Value};
 
 use crate::browser::Link;
-use crate::{api_send, Shell};
+use crate::{api_send, Shell, View};
 
 pub const BUCKETS: [(&str, &str); 5] =
     [("reply", "Reply"), ("act", "Act"), ("prepare", "Prepare"), ("fyi", "FYI"), ("noise", "Noise")];
@@ -110,6 +110,9 @@ fn Entry(entry: Value, on_change: EventHandler<(String, Value)>) -> Element {
     let bucket = text(&triage["bucket"]);
     let priority = triage["priority"].as_u64().unwrap_or(0);
     let done = triage["done"] == true;
+    let mut view = use_context::<Shell>().view;
+    let reviewable = matches!(item["kind"].as_str(), Some("pull_request") | Some("review_request"));
+    let (id_review, title_review) = (id.clone(), title.clone());
     let (id_move, id_rank, id_done, id_snooze) = (id.clone(), id.clone(), id.clone(), id.clone());
     rsx! {
         article { class: "inbox-entry",
@@ -159,6 +162,14 @@ fn Entry(entry: Value, on_change: EventHandler<(String, Value)>) -> Element {
                         for p in 0..=3u64 {
                             option { value: "{p}", selected: p == priority, "{p}" }
                         }
+                    }
+                }
+                if reviewable {
+                    button {
+                        class: "toggle",
+                        title: "Open the change: files, risk map and diff",
+                        onclick: move |_| view.set(Some(View::Review(id_review.clone(), title_review.clone()))),
+                        "Review"
                     }
                 }
                 if !done {

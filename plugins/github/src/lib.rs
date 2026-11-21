@@ -138,6 +138,47 @@ fn sync() -> Result<usize, String> {
     Ok(open.len())
 }
 
+/// The files of one pull request, for the review view. `external_id` is `owner/name#number`.
+fn review(args: &str) -> Result<String, String> {
+    let args: Value = serde_json::from_str(args).map_err(|e| e.to_string())?;
+    let (repo, number) = args["external_id"]
+        .as_str()
+        .and_then(|id| id.rsplit_once('#'))
+        .filter(|(repo, number)| valid_repo(repo) && !number.is_empty() && number.chars().all(|c| c.is_ascii_digit()))
+        .ok_or("not a pull request id")?;
+    let cfg = config();
+    let token = host::secret("GITHUB_TOKEN");
+    let token = token.as_deref();
+    let pr = get(&format!("{}/repos/{repo}/pulls/{number}", cfg.api), token)?;
+    let listed = get(&format!("{}/repos/{repo}/pulls/{number}/files?per_page=100", cfg.api), token)?;
+    let files: Vec<Value> = listed
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|f| {
+            json!({
+                "path": f["filename"],
+                "status": f["status"],
+                "additions": f["additions"],
+                "deletions": f["deletions"],
+                "patch": f["patch"].as_str().unwrap_or(""),
+            })
+        })
+        .collect();
+    Ok(json!({
+        "title": pr["title"],
+        "body": pr["body"].as_str().unwrap_or(""),
+        "author": pr["user"]["login"],
+        "url": pr["html_url"],
+        "base": pr["base"]["ref"],
+        "head": pr["head"]["ref"],
+        // One page of files is read; larger pull requests are flagged as incomplete.
+        "truncated": pr["changed_files"].as_u64().is_some_and(|n| n as usize > files.len()),
+        "files": files,
+    })
+    .to_string())
+}
+
 fn pulls_panel(note: Option<String>) -> Result<String, String> {
     let cfg = config();
     let has_token = host::secret("GITHUB_TOKEN").is_some();
@@ -217,6 +258,7 @@ impl Guest for Github {
     fn command(id: String, _args: String) -> Result<String, String> {
         match id.as_str() {
             "github.sync" => Ok(json!({ "open": sync()? }).to_string()),
+            "github.review" => review(&_args),
             other => Err(format!("no command {other}")),
         }
     }

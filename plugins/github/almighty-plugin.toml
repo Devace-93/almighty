@@ -23,3 +23,11 @@ type = "declarative"
 [[commands]]
 id = "github.sync"
 title = "Sync pull requests now"
+
+[[commands]]
+id = "github.review"
+title = "Files of a pull request"
+
+[review]
+command = "github.review"
+kinds = ["pull_request", "review_request"]

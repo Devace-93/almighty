@@ -468,3 +468,31 @@ span.link { cursor: pointer; text-decoration: underline; }
 .p-badge.prio-3 { border-color: #d06060; color: #d06060; }
 .p-badge.prio-2 { border-color: #d0a060; color: #d0a060; }
 .p-badge.prio-0 { color: var(--muted); }
+
+/* Review */
+.review-file { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+.review-file > summary { padding: 8px 12px; cursor: pointer; overflow-wrap: anywhere; }
+.review-file > .p-code { border-radius: 0 0 8px 8px; }
+.review-file > .p-empty { padding: 0 12px 10px; }
+.p-code .hunk { color: #8fb4ff; }
+.p-badge.risk-high { border-color: #d06060; color: #d06060; }
+.p-badge.risk-medium { border-color: #d0a060; color: #d0a060; }
+.p-badge.risk-low { color: var(--muted); }
+.p-card ul { margin: 0 0 8px; padding-left: 18px; }
+.p-card h3:not(:first-child) { margin-top: 10px; }
+
+/* Explainer: a button and its answer over the current view */
+.explainer { position: fixed; right: 16px; bottom: 16px; z-index: 20; display: flex; flex-direction: column; align-items: flex-end; gap: 8px; max-width: min(520px, calc(100vw - 32px)); pointer-events: none; }
+.explainer > * { pointer-events: auto; }
+.explain-button { background: var(--panel); box-shadow: 0 2px 10px rgb(0 0 0 / 0.25); }
+.explain-card { padding: 12px 14px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 6px 24px rgb(0 0 0 / 0.3); max-height: 50vh; overflow-y: auto; }
+.explain-card .p-row { justify-content: space-between; margin-bottom: 6px; }
+
+/* Rich terminal: images the application printed inline */
+.media-strip { display: flex; gap: 8px; padding: 8px 12px; overflow-x: auto; background: var(--panel); border-bottom: 1px solid var(--line); }
+.media-thumb { flex: none; padding: 0; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); cursor: zoom-in; }
+.media-thumb img { display: block; height: 72px; max-width: 220px; object-fit: contain; border-radius: 5px; }
+.media-thumb.active { cursor: zoom-out; border-color: var(--accent); }
+.media-strip.zoomed .media-thumb.active img { height: min(46vh, 480px); max-width: min(80vw, 900px); }
+.media-thumb:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+@media (max-width: 720px) { .explainer { bottom: 64px; } }

@@ -300,6 +300,23 @@ async fn model_step_refines_and_fails_safely() {
         assert_eq!((entry["triage"]["bucket"].as_str(), entry["triage"]["origin"].as_str()), (Some("reply"), Some("rules")), "{entry}");
     }
 
+    // Explainer: uses the same provider and the person's language; refuses what it cannot do well.
+    let (port, seen) = provider(json!({ "stop_reason": "end_turn", "content": [{ "type": "text", "text": " Es un bucle. " }] }), 200);
+    config(port);
+    let (status, out) = call(&router, "POST", "/api/explain", &ana, Some(json!({ "text": "for i in 0..3 {}", "context": "terminal output" }))).await;
+    assert_eq!(status, StatusCode::OK, "{out}");
+    assert_eq!(out["explanation"], "Es un bucle.");
+    let request = seen.lock().unwrap()[0].clone();
+    let body: Value = serde_json::from_str(&request[request.find("\r\n\r\n").unwrap() + 4..]).unwrap();
+    let input: Value = serde_json::from_str(body["messages"][0]["content"].as_str().unwrap()).unwrap();
+    assert_eq!((input["language"].as_str(), input["selection"].as_str(), input["context"].as_str()), (Some("es"), Some("for i in 0..3 {}"), Some("terminal output")));
+    assert_eq!(call(&router, "POST", "/api/explain", &ana, Some(json!({ "text": "  " }))).await.0, StatusCode::BAD_REQUEST);
+    let long = "x".repeat(20_001);
+    assert_eq!(call(&router, "POST", "/api/explain", &ana, Some(json!({ "text": long }))).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(seen.lock().unwrap().len(), 1, "refused requests never reach the provider");
+    std::fs::remove_file(dir.join("workspace.toml")).unwrap();
+    assert_eq!(call(&router, "POST", "/api/explain", &ana, Some(json!({ "text": "x" }))).await.0, StatusCode::SERVICE_UNAVAILABLE);
+
     // The command provider: prompt on stdin, JSON on stdout.
     #[cfg(unix)]
     {

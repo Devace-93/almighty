@@ -225,6 +225,11 @@ pub fn build(config: Config, store: Store) -> (Router, App) {
         .route("/api/plugins/{id}/commands/{command}", post(run_command))
         .route("/api/items", get(list_items))
         .route("/api/layout", get(layout))
+        .route("/api/sessions/{id}/media", get(session_media))
+        .route("/api/sessions/{id}/media/{media}", get(session_media_file))
+        .route("/api/review/{item}", get(review))
+        .route("/api/review/{item}/summary", post(review_summary))
+        .route("/api/explain", post(explain))
         .route("/api/inbox", get(inbox))
         .route("/api/inbox/counts", get(inbox_counts))
         .route("/api/inbox/preferences", get(inbox_preferences))
@@ -1183,6 +1188,98 @@ async fn layout(State(app): State<App>, Extension(who): Who) -> ApiResult {
         Err(_) => toml::Table::new(),
     };
     Ok(Json(json!(value)))
+}
+
+// ---- rich terminal, review, explainer ----
+
+async fn session_media(State(app): State<App>, Extension(who): Who, Path(id): Path<String>) -> ApiResult {
+    let session = need(&app, &who, &id, Scope::Read)?;
+    Ok(Json(json!({ "media": session.media_list() })))
+}
+
+async fn session_media_file(State(app): State<App>, Extension(who): Who, Path((id, media)): Path<(String, u64)>) -> Result<Response, ApiError> {
+    let session = need(&app, &who, &id, Scope::Read)?;
+    let media = session.media_get(media).ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "no such image".into()))?;
+    // The type was taken from the bytes; `nosniff` keeps a browser from second-guessing it.
+    let headers = [
+        (header::CONTENT_TYPE, media.mime),
+        (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        (header::CACHE_CONTROL, "private, max-age=3600"),
+    ];
+    Ok((headers, media.data.as_ref().clone()).into_response())
+}
+
+/// Asks the plugin that brought an item in for the files of the change.
+async fn change_of(app: &App, item_id: &str) -> Result<crate::review::Change, ApiError> {
+    let item = app.store.item(item_id).ok_or_else(|| ApiError(StatusCode::NOT_FOUND, format!("no item {item_id}")))?;
+    let plugin = need_plugin(app, &item.plugin)?;
+    let review = plugin.manifest.review.clone().filter(|r| r.kinds.is_empty() || r.kinds.contains(&item.kind));
+    let Some(review) = review else {
+        return Err(bad(format!("items of kind {} from {} cannot be opened for review", item.kind, item.plugin)));
+    };
+    let args = json!({ "external_id": item.external_id, "url": item.url, "thread": item.thread });
+    let value = plugin_call(app, item.plugin.clone(), Call::Command { id: review.command, args }).await?;
+    serde_json::from_value(value).map_err(|e| ApiError(StatusCode::BAD_GATEWAY, format!("the plugin's review data is malformed: {e}")))
+}
+
+async fn review(State(app): State<App>, Extension(who): Who, Path(item): Path<String>) -> ApiResult {
+    need_role(&who, Role::Member)?;
+    Ok(Json(crate::review::report(&change_of(&app, &item).await?)))
+}
+
+/// Runs the operator's model once; `503` when none is configured.
+async fn ask_model(app: &App, system: &'static str, input: String, effort: &'static str) -> Result<String, ApiError> {
+    let data_dir = app.config.data_dir.clone();
+    tokio::task::spawn_blocking(move || {
+        let provider = crate::llm::Provider::load(&data_dir).ok_or_else(|| {
+            ApiError(StatusCode::SERVICE_UNAVAILABLE, "No model is configured. Add an [llm] section to workspace.toml to use this.".into())
+        })?;
+        provider.complete(system, &input, effort).map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e))
+    })
+    .await
+    .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+}
+
+async fn review_summary(State(app): State<App>, Extension(who): Who, Path(item): Path<String>) -> ApiResult {
+    let (_, name) = need_role(&who, Role::Member)?;
+    let language = crate::triage::Prefs::load(&app.config.data_dir, name).unwrap_or_default().input_language;
+    let change = change_of(&app, &item).await?;
+    let (input, left_out) = crate::review::summary_input(&change, &language);
+    let answer = ask_model(&app, crate::review::SUMMARY_INSTRUCTIONS, input, "medium").await?;
+    let mut summary = crate::review::parse_summary(&answer).map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e))?;
+    // The reader must know what the model did not see.
+    summary["files_left_out"] = json!(left_out);
+    Ok(Json(summary))
+}
+
+#[derive(Deserialize)]
+struct ExplainReq {
+    text: String,
+    /// Where the selection comes from, e.g. "terminal output" or a file path.
+    #[serde(default)]
+    context: String,
+}
+
+const MAX_EXPLAIN_CHARS: usize = 20_000;
+
+async fn explain(State(app): State<App>, Extension(who): Who, Json(req): Json<ExplainReq>) -> ApiResult {
+    let (_, name) = need_role(&who, Role::Member)?;
+    if req.text.trim().is_empty() {
+        return Err(bad("select some text first"));
+    }
+    // Refused, not cut: an explanation of half a selection would mislead.
+    if req.text.chars().count() > MAX_EXPLAIN_CHARS {
+        return Err(bad(format!("the selection is too long to explain at once (limit {MAX_EXPLAIN_CHARS} characters)")));
+    }
+    let language = crate::triage::Prefs::load(&app.config.data_dir, name).unwrap_or_default().input_language;
+    let input = json!({
+        "language": if language.is_empty() { "the language of the selection, or English for code" } else { language.as_str() },
+        "context": req.context.chars().take(300).collect::<String>(),
+        "selection": req.text,
+    })
+    .to_string();
+    let answer = ask_model(&app, crate::review::EXPLAIN_INSTRUCTIONS, input, "low").await?;
+    Ok(Json(json!({ "explanation": answer.trim() })))
 }
 
 // ---- inbox ----

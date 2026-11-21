@@ -18,6 +18,9 @@ pub struct Manifest {
     pub permissions: Permissions,
     #[serde(default)]
     pub connector: Option<Connector>,
+    /// The command that returns the files of a change, for the review view.
+    #[serde(default)]
+    pub review: Option<Review>,
     #[serde(default)]
     pub panels: Vec<Panel>,
     #[serde(default)]
@@ -49,6 +52,14 @@ pub struct Connector {
     /// 0: only when someone asks.
     #[serde(default)]
     pub poll_seconds: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Review {
+    pub command: String,
+    /// Item kinds it can open, e.g. ["pull_request"].
+    #[serde(default)]
+    pub kinds: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -122,6 +133,11 @@ impl Manifest {
         }
         if let Some(bad) = m.commands.iter().find(|c| !valid_name(&c.id)) {
             return Err(format!("manifest: command id {:?} is not valid", bad.id));
+        }
+        if let Some(review) = &m.review {
+            if !m.commands.iter().any(|c| c.id == review.command) {
+                return Err("manifest: [review] command must be one of the declared commands".into());
+            }
         }
         Ok(m)
     }

@@ -161,8 +161,8 @@ pub async fn read_clipboard() -> Option<String> {
     value.as_str().map(str::to_string).filter(|t| !t.is_empty())
 }
 
-#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
-async fn selected_text() -> Option<String> {
+/// The text currently selected in the page, if any.
+pub async fn selected_text() -> Option<String> {
     let value = dioxus::document::eval("return window.getSelection().toString();").await.ok()?;
     value.as_str().map(str::to_string).filter(|t| !t.is_empty())
 }

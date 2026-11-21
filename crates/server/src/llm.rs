@@ -1,9 +1,9 @@
-//! Optional LLM step of triage. The operator chooses the provider in
-//! `workspace.toml`; without one, triage is rules only and no item content
-//! leaves the server.
+//! The model provider the operator chose in `workspace.toml`, used by
+//! triage, the explainer and review summaries. Without one those features
+//! fall back to what the server can do alone, and no content leaves it.
 //!
 //! ```toml
-//! [triage]
+//! [llm]                             # `[triage]` is read too, for older files
 //! provider = "anthropic"            # or "command"
 //! model = "claude-opus-5-5"         # anthropic only
 //! api_key_env = "ANTHROPIC_API_KEY" # name of the variable, never the key
@@ -17,8 +17,8 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-use super::{Prefs, Row, BUCKETS};
 use crate::plugins::db::Item;
+use crate::triage::{Prefs, Row, BUCKETS};
 
 const DEFAULT_MODEL: &str = "claude-opus-5-5";
 const API_VERSION: &str = "2026-10-21";
@@ -50,7 +50,7 @@ impl Provider {
     pub fn load(data_dir: &Path) -> Option<Provider> {
         let text = std::fs::read_to_string(data_dir.join("workspace.toml")).ok()?;
         let root: toml::Table = toml::from_str(&text).ok()?;
-        let t = root.get("triage")?.as_table()?;
+        let t = root.get("llm").or_else(|| root.get("triage"))?.as_table()?;
         let string = |key: &str, default: &str| t.get(key).and_then(|v| v.as_str()).unwrap_or(default).to_string();
         match t.get("provider")?.as_str()? {
             "command" => {
@@ -84,11 +84,15 @@ impl Provider {
             },
         })
         .to_string();
-        let answer = match self {
-            Provider::Command { argv } => run_command(argv, &format!("{INSTRUCTIONS}\n\n{input}"))?,
-            Provider::Anthropic { base_url, model, key_env } => call_anthropic(base_url, model, key_env, &input)?,
-        };
-        parse(&answer, rules)
+        parse(&self.complete(INSTRUCTIONS, &input, "low")?, rules)
+    }
+
+    /// One request, one answer. `effort` is low, medium or high; commands ignore it.
+    pub fn complete(&self, system: &str, input: &str, effort: &str) -> Result<String, String> {
+        match self {
+            Provider::Command { argv } => run_command(argv, &format!("{system}\n\n{input}")),
+            Provider::Anthropic { base_url, model, key_env } => call_anthropic(base_url, model, key_env, system, input, effort),
+        }
     }
 }
 
@@ -147,15 +151,14 @@ fn run_command(argv: &[String], prompt: &str) -> Result<String, String> {
     reader.join().map_err(|_| "cannot read the answer".to_string())
 }
 
-fn call_anthropic(base_url: &str, model: &str, key_env: &str, input: &str) -> Result<String, String> {
+fn call_anthropic(base_url: &str, model: &str, key_env: &str, system: &str, input: &str, effort: &str) -> Result<String, String> {
     let key = std::env::var(key_env).ok().filter(|k| !k.is_empty()).ok_or_else(|| format!("{key_env} is not set"))?;
     let mut body = json!({
         "model": model,
-        "max_tokens": 4000,
-        "system": INSTRUCTIONS,
+        "max_tokens": 16000,
+        "system": system,
         "messages": [{ "role": "user", "content": input }],
-        // Sorting an inbox item is a small task.
-        "output_config": { "effort": "low" },
+        "output_config": { "effort": effort },
     });
     let agent = ureq::Agent::config_builder()
         .http_status_as_error(false)
@@ -180,7 +183,7 @@ fn call_anthropic(base_url: &str, model: &str, key_env: &str, input: &str) -> Re
         return Err(format!("the provider answered {status}: {}", v["error"]["message"].as_str().unwrap_or("no message")));
     }
     match v["stop_reason"].as_str() {
-        Some("refusal") => return Err("the provider declined this item".into()),
+        Some("refusal") => return Err("the provider declined this request".into()),
         Some("max_tokens") => return Err("the provider's answer was cut off".into()),
         _ => {}
     }

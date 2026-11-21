@@ -297,3 +297,36 @@ async fn background_sessions_keep_running_out_of_the_list() {
     assert_eq!(count(&call(&router, "GET", "/api/sessions", Some(&user), None).await.1), 1);
     call(&router, "DELETE", &format!("/api/sessions/{id}"), Some(&user), None).await;
 }
+
+/// Images printed with the iTerm2 inline-image sequence are kept for rich clients.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn inline_images_are_captured() {
+    let (router, app) = app();
+    let id = app.store.create_user("ana", PASSWORD, Role::Member).unwrap();
+    let token = app.store.create_user_token(id, "api", "t", None).unwrap().1;
+    // A 1x1 PNG, then something that only claims to be an image.
+    let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+    let script = format!(
+        "printf '\\033]1337;File=name=ZG90LnBuZw==;inline=1:{png}\\007'; printf '\\033]1337;File=name=eA==;inline=1:PHNjcmlwdD4=\\007'; printf '\\033]1337;File=name=eA==:{png}\\007'; echo shown"
+    );
+    let (status, s) = call(&router, "POST", "/api/sessions", Some(&token), Some(json!({ "command": ["sh", "-c", script] }))).await;
+    assert_eq!(status, StatusCode::OK, "{s}");
+    let sid = s["id"].as_str().unwrap();
+    call(&router, "POST", &format!("/api/sessions/{sid}/wait"), Some(&token), Some(json!({ "pattern": "shown", "timeout_ms": 5000 }))).await;
+
+    let (_, list) = call(&router, "GET", &format!("/api/sessions/{sid}/media"), Some(&token), None).await;
+    assert_eq!(list["media"], json!([{ "id": 1, "name": "dot.png", "mime": "image/png", "size": 70 }]), "only the real, inline image");
+    let (_, info) = call(&router, "GET", &format!("/api/sessions/{sid}"), Some(&token), None).await;
+    assert_eq!(info["media"], 1);
+
+    let req = Request::builder().uri(format!("/api/sessions/{sid}/media/1?token={token}")).body(Body::empty()).unwrap();
+    let res = router.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.headers()["content-type"], "image/png");
+    assert_eq!(res.headers()["x-content-type-options"], "nosniff");
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&bytes[..4], b"\x89PNG");
+    assert_eq!(call(&router, "GET", &format!("/api/sessions/{sid}/media/9"), Some(&token), None).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(call(&router, "GET", &format!("/api/sessions/{sid}/media"), None, None).await.0, StatusCode::UNAUTHORIZED);
+}
