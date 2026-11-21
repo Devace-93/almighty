@@ -11,6 +11,7 @@ component = "target/wasm32-wasip2/release/almighty_github_plugin.wasm"
 items = ["write"]
 network = ["api.github.com"]
 secrets = ["GITHUB_TOKEN"]
+agent_tools = ["github.review"]   # agents may read pull requests; nothing here writes to GitHub
 
 [connector]
 poll_seconds = 300
@@ -27,6 +28,8 @@ title = "Sync pull requests now"
 [[commands]]
 id = "github.review"
 title = "Files of a pull request"
+description = "Reads a pull request: title, body, author, branches and the patch of each changed file (first 100 files). Read-only."
+input = { type = "object", required = ["external_id"], properties = { external_id = { type = "string", description = "The pull request as owner/repo#number, e.g. rust-lang/cargo#1234" } } }
 
 [review]
 command = "github.review"

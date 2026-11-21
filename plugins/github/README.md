@@ -7,6 +7,15 @@ Brings open pull requests into almighty as items and shows them in a panel.
 - With a token it also reads private repositories the token can see and the
   pull requests waiting for your review.
 
+## Agents
+
+Agents in almighty sessions can read a pull request (title, body and the
+patch of each file) through the `github.review` command. With a token set,
+that covers every repository the token can see, not only the ones listed in
+`repos`, so give the token the narrowest access that works. Nothing the
+plugin offers to agents writes to GitHub. The admin sees this permission when
+approving the plugin.
+
 ## Build and install
 
 ```sh
