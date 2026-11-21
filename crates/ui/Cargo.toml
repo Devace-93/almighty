@@ -28,6 +28,10 @@ dirs = "6"
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18"
 
+[target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
+# Desktop webviews do not grant the page a usable clipboard API.
+arboard = { version = "3", default-features = false }
+
 [features]
 default = ["web"]
 web = ["dioxus/web"]

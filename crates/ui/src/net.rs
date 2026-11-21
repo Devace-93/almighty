@@ -138,7 +138,13 @@ fn storage_path(key: &str) -> Option<std::path::PathBuf> {
     Some(dirs::config_dir()?.join("almighty").join(format!("{key}.json")))
 }
 
+// Clipboard. On the web the page's own clipboard API is the only option.
+// Desktop webviews do not grant it reliably (WebView2 serves the app from a
+// non-secure origin; WebKitGTK refuses reads), so desktop builds go to the
+// system clipboard directly.
+
 /// Copies the current text selection to the clipboard.
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
 pub async fn copy_selection() {
     let _ = dioxus::document::eval(
         "const t = window.getSelection().toString(); if (t) { await navigator.clipboard.writeText(t); } return true;",
@@ -147,9 +153,51 @@ pub async fn copy_selection() {
 }
 
 /// Text on the clipboard, if the platform lets the page read it.
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
 pub async fn read_clipboard() -> Option<String> {
     let value = dioxus::document::eval("try { return await navigator.clipboard.readText(); } catch (e) { return null; }")
         .await
         .ok()?;
     value.as_str().map(str::to_string).filter(|t| !t.is_empty())
+}
+
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+async fn selected_text() -> Option<String> {
+    let value = dioxus::document::eval("return window.getSelection().toString();").await.ok()?;
+    value.as_str().map(str::to_string).filter(|t| !t.is_empty())
+}
+
+/// Copies the current text selection to the clipboard.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+pub async fn copy_selection() {
+    let Some(text) = selected_text().await else { return };
+    if let Ok(mut clipboard) = arboard::Clipboard::new() {
+        let _ = clipboard.set_text(text);
+    }
+}
+
+/// Text on the clipboard, if there is any.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+pub async fn read_clipboard() -> Option<String> {
+    arboard::Clipboard::new().ok()?.get_text().ok().filter(|t| !t.is_empty())
+}
+
+// Linux: the window is GTK, so its clipboard works on both X11 and Wayland.
+// These run on the GTK main thread, like the rest of the desktop UI.
+
+/// Copies the current text selection to the clipboard.
+#[cfg(target_os = "linux")]
+pub async fn copy_selection() {
+    let Some(text) = selected_text().await else { return };
+    gtk::Clipboard::get(&gtk::gdk::SELECTION_CLIPBOARD).set_text(&text);
+}
+
+/// Text on the clipboard, if there is any.
+#[cfg(target_os = "linux")]
+pub async fn read_clipboard() -> Option<String> {
+    let (tx, rx) = futures_channel::oneshot::channel();
+    gtk::Clipboard::get(&gtk::gdk::SELECTION_CLIPBOARD).request_text(move |_, text| {
+        let _ = tx.send(text.map(str::to_string));
+    });
+    rx.await.ok().flatten().filter(|t| !t.is_empty())
 }
