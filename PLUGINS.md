@@ -2,9 +2,9 @@
 
 **Status.** Light (WebAssembly) plugins are implemented: manifest,
 permissions, storage, secrets, outbound HTTP, items, connectors, declarative
-panels and commands. The interface is `wit/plugin.wit`; `plugins/example` is
+panels, commands and agent tools. The interface is `wit/plugin.wit`; `plugins/example` is
 the smallest plugin; `plugins/github`, `plugins/slack` and `plugins/gmail` are connectors. Service plugins are implemented on almighty's side (see
-"Service plugins" below). Still a draft, not built yet: triage rules, item actions, agent tools, agent
+"Service plugins" below). Still a draft, not built yet: triage rules, item actions, agent
 adapters, terminal access from plugins, events, `llm`, `notify`, web panels,
 and installing from a git URL or a registry. Sections below mark what exists.
 
@@ -37,6 +37,7 @@ terminals = ["read"]          # "read" | "write" | "create"
 network = ["api.github.com"]  # outbound hosts, exact or "*.example.com" (wasm only)
 secrets = ["GITHUB_TOKEN"]    # names an admin may provide; nothing else is readable
 events = ["item.created", "terminal.exited"]
+agent_tools = ["flows.run"]    # commands agents may call as tools (wasm only)
 
 [[panels]]
 id = "runs"
@@ -48,6 +49,10 @@ type = "declarative"          # "declarative" | "web"
 [[commands]]
 id = "flows.run"
 title = "Run workflow…"
+description = "Starts a workflow by name."   # required for an agent tool
+input = { type = "object", properties = { name = { type = "string" } }, required = ["name"] }
+# Agents may call a command only when it is listed under
+# [permissions] agent_tools = ["flows.run"], which the admin approves.
 
 [review]                      # optional: items of these kinds open in the review view
 command = "github.review"     # a declared command; gets {external_id, url, thread}
@@ -64,7 +69,7 @@ kinds = ["pull_request"]      # and returns {title, body, author, url, base, hea
 | Item action | a button on an item ("Approve PR", "Snooze", "Create task") |
 | Panel | a view: declarative tree, or a web embed |
 | Command | palette entry, bindable to a key |
-| Agent tools | MCP tools merged into the workspace MCP endpoint, namespaced by plugin id |
+| Agent tools | Commands listed in `permissions.agent_tools` appear as MCP tools in `almighty mcp`, named `<plugin id>__<command id>` with `.` written as `_`. `GET /api/agent-tools` lists them. An agent can run those commands and no others; each call is in the audit log |
 | Agent adapter | a runtime that reports sessions, subagents and normalized events |
 
 ## Declarative panels (implemented)

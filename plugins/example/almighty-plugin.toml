@@ -11,6 +11,7 @@ component = "target/wasm32-wasip2/release/almighty_example_plugin.wasm"
 items = ["write"]
 network = ["127.0.0.1"]
 secrets = ["EXAMPLE_TOKEN"]
+agent_tools = ["example.items"]   # commands agents may call as tools
 
 [connector]
 poll_seconds = 0   # only on demand
@@ -27,6 +28,8 @@ title = "Fetch a URL"
 [[commands]]
 id = "example.items"
 title = "List items"
+description = "Lists the items this plugin stored, newest first."
+input = { type = "object", properties = { limit = { type = "integer", description = "How many items at most" } } }
 
 [[commands]]
 id = "example.spin"

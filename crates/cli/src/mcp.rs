@@ -72,7 +72,28 @@ fn tools() -> Value {
     ])
 }
 
+/// Commands that installed plugins offer to agents. A server without
+/// plugins, or one that cannot be reached, simply adds no tools.
+async fn plugin_tools(client: &Client) -> Vec<Value> {
+    match client.get("/api/agent-tools").await {
+        Ok(v) => v["tools"].as_array().cloned().unwrap_or_default(),
+        Err(_) => Vec::new(),
+    }
+}
+
 async fn call_tool(client: &Client, name: &str, args: &Value) -> Result<Value> {
+    if !name.starts_with("terminal_") {
+        let tools = plugin_tools(client).await;
+        let Some(tool) = tools.iter().find(|t| t["name"] == name) else {
+            anyhow::bail!("unknown tool {name}");
+        };
+        let path = format!(
+            "/api/plugins/{}/commands/{}",
+            tool["plugin"].as_str().unwrap_or(""),
+            tool["command"].as_str().unwrap_or("")
+        );
+        return Ok(client.post(&path, args.clone()).await?["result"].take());
+    }
     let session = args["session"].as_str().unwrap_or("");
     let path = |suffix: &str| format!("/api/sessions/{session}{suffix}");
     match name {
@@ -111,7 +132,13 @@ pub async fn serve(client: Client) -> Result<()> {
                 "serverInfo": { "name": "almighty", "version": env!("CARGO_PKG_VERSION") }
             })),
             "ping" => Ok(json!({})),
-            "tools/list" => Ok(json!({ "tools": tools() })),
+            "tools/list" => {
+                let mut all = tools().as_array().cloned().unwrap_or_default();
+                for t in plugin_tools(&client).await {
+                    all.push(json!({ "name": t["name"], "description": t["description"], "inputSchema": t["input_schema"] }));
+                }
+                Ok(json!({ "tools": all }))
+            }
             "tools/call" => {
                 let name = req["params"]["name"].as_str().unwrap_or("");
                 let args = req["params"].get("arguments").cloned().unwrap_or(json!({}));

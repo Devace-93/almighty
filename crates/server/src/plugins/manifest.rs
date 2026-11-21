@@ -72,6 +72,10 @@ pub struct Permissions {
     pub secrets: Vec<String>,
     #[serde(default)]
     pub events: Vec<String>,
+    /// Commands that agents may call as tools. Part of what the admin
+    /// approves, so an update cannot open a command to agents silently.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agent_tools: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -108,6 +112,28 @@ fn declarative() -> String {
 pub struct Command {
     pub id: String,
     pub title: String,
+    /// What the command does, for an agent choosing a tool.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    /// JSON Schema of the arguments; any object when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<serde_json::Value>,
+}
+
+impl Manifest {
+    /// The commands agents may call, in manifest order.
+    pub fn agent_tools(&self) -> impl Iterator<Item = &Command> {
+        self.commands.iter().filter(|c| self.permissions.agent_tools.contains(&c.id))
+    }
+}
+
+/// The MCP name of a plugin command: letters, digits, `_` and `-` only, at
+/// most 64 characters, and the same for every caller.
+pub fn tool_name(plugin: &str, command: &str) -> String {
+    let clean = |s: &str| s.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).collect::<String>();
+    let mut name = format!("{}__{}", clean(plugin), clean(command));
+    name.truncate(64);
+    name
 }
 
 fn valid_id(id: &str) -> bool {
@@ -192,6 +218,17 @@ impl Manifest {
         }
         if let Some(bad) = m.commands.iter().find(|c| !valid_name(&c.id)) {
             return Err(format!("manifest: command id {:?} is not valid", bad.id));
+        }
+        for id in &p.agent_tools {
+            let Some(command) = m.commands.iter().find(|c| c.id == *id) else {
+                return Err(format!("manifest: permissions.agent_tools lists {id:?}, which is not a declared command"));
+            };
+            if command.description.trim().is_empty() || command.description.len() > 1000 {
+                return Err(format!("manifest: command {id:?} needs a description (up to 1000 characters) to be an agent tool"));
+            }
+            if command.input.as_ref().is_some_and(|schema| schema["type"] != "object") {
+                return Err(format!("manifest: the input of command {id:?} must be a JSON Schema of type \"object\""));
+            }
         }
         if let Some(review) = &m.review {
             if !m.commands.iter().any(|c| c.id == review.command) {

@@ -244,6 +244,7 @@ pub fn build(config: Config, store: Store) -> (Router, App) {
         .route("/api/plugins/{id}/panels/{panel}", get(render_panel))
         .route("/api/plugins/{id}/panels/{panel}/action", post(panel_action))
         .route("/api/plugins/{id}/commands/{command}", post(run_command))
+        .route("/api/agent-tools", get(agent_tools))
         .route("/api/items", get(list_items))
         .route("/api/layout", get(layout))
         .route("/api/sessions/{id}/media", get(session_media))
@@ -1326,9 +1327,41 @@ async fn run_command(
     Path((id, command)): Path<(String, String)>,
     body: Option<Json<Value>>,
 ) -> ApiResult {
-    need_role(&who, Role::Member)?;
+    // People run any command. An agent only runs the ones the plugin offers
+    // to agents, which the admin approved at install; each call is logged.
+    if let Principal::Agent { .. } = &who {
+        let plugin = need_plugin(&app, &id)?;
+        if !plugin.enabled || !plugin.manifest.permissions.agent_tools.contains(&command) {
+            return Err(forbidden("this command is not offered to agents"));
+        }
+        app.store.audit(&who.label(), None, "plugin.command", &format!("{id} {command}"));
+    } else {
+        need_role(&who, Role::Member)?;
+    }
     let args = body.map(|Json(v)| v).unwrap_or(Value::Null);
     Ok(Json(json!({ "result": plugin_call(&app, id, Call::Command { id: command, args }).await? })))
+}
+
+/// Plugin commands that agents may call, as MCP tool definitions. Guests
+/// get an empty list: they cannot run commands.
+async fn agent_tools(State(app): State<App>, Extension(who): Who) -> ApiResult {
+    if matches!(&who, Principal::User { role, .. } if *role < Role::Member) {
+        return Ok(Json(json!({ "tools": [] })));
+    }
+    let mut tools = Vec::new();
+    for plugin in app.plugins.list().iter().filter(|p| p.enabled) {
+        for command in plugin.manifest.agent_tools() {
+            tools.push(json!({
+                "name": crate::plugins::manifest::tool_name(&plugin.manifest.id, &command.id),
+                "plugin": plugin.manifest.id,
+                "command": command.id,
+                "title": command.title,
+                "description": format!("{} (plugin {})", command.description.trim(), plugin.manifest.name),
+                "input_schema": command.input.clone().unwrap_or_else(|| json!({ "type": "object" })),
+            }));
+        }
+    }
+    Ok(Json(json!({ "tools": tools })))
 }
 
 async fn list_items(State(app): State<App>, Extension(who): Who, Query(q): Query<ItemQuery>) -> ApiResult {

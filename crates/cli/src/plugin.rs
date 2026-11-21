@@ -61,6 +61,7 @@ fn describe(p: &Permissions) -> Vec<(&'static str, String)> {
         ("network (outbound hosts)", list(&p.network)),
         ("secrets it may read", list(&p.secrets)),
         ("events", list(&p.events)),
+        ("commands agents may call", list(&p.agent_tools)),
     ]
 }
 

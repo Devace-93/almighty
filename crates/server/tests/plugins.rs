@@ -620,3 +620,64 @@ async fn gmail_connector() {
     assert!(out["error"].as_str().unwrap().contains("refused the refresh token"), "{out}");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[tokio::test]
+async fn agents_call_only_the_commands_offered_to_them() {
+    let dir = data_dir();
+    let (router, app, admin) = installed(&dir).await;
+    let (_, agent) = app.store.create_agent_token("s1").unwrap();
+    let guest = token(&app, "gil", Role::Guest);
+
+    // The approved list is part of the permissions the admin saw.
+    let (_, plugin) = call(&router, "GET", "/api/plugins/net.ema.example", &admin, None).await;
+    assert_eq!(plugin["permissions"]["agent_tools"], json!(["example.items"]));
+
+    let (status, body) = call(&router, "GET", "/api/agent-tools", &agent, None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let tools = body["tools"].as_array().unwrap();
+    assert_eq!(tools.len(), 1, "{body}");
+    assert_eq!(tools[0]["name"], "net_ema_example__example_items");
+    assert_eq!(tools[0]["input_schema"]["type"], "object");
+    assert!(tools[0]["description"].as_str().unwrap().contains("plugin example"));
+    let (_, body) = call(&router, "GET", "/api/agent-tools", &guest, None).await;
+    assert_eq!(body["tools"], json!([]));
+
+    // The offered command runs for the agent and is logged under its name.
+    let path = "/api/plugins/net.ema.example/commands";
+    let (status, body) = call(&router, "POST", &format!("{path}/example.items"), &agent, Some(json!({}))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (_, audit) = call(&router, "GET", "/api/audit", &admin, None).await;
+    assert!(
+        audit["entries"].as_array().unwrap().iter().any(|e| e["action"] == "plugin.command" && e["actor"] == "agent:s1"),
+        "{audit}"
+    );
+
+    // Other commands, and everything else about plugins, stay closed to it.
+    let (status, _) = call(&router, "POST", &format!("{path}/example.fetch"), &agent, Some(json!({ "url": "http://127.0.0.1:1/" }))).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = call(&router, "GET", "/api/plugins", &agent, None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // A disabled plugin offers nothing.
+    let (status, _) = call(&router, "POST", "/api/plugins/net.ema.example/enabled", &admin, Some(json!({ "enabled": false }))).await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, body) = call(&router, "GET", "/api/agent-tools", &agent, None).await;
+    assert_eq!(body["tools"], json!([]));
+    let (status, _) = call(&router, "POST", &format!("{path}/example.items"), &agent, Some(json!({}))).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // A manifest cannot offer a command it does not declare, or one without a description.
+    let undeclared = manifest().replace("agent_tools = [\"example.items\"]", "agent_tools = [\"example.nope\"]");
+    let mut body = install_body();
+    body["manifest"] = json!(undeclared);
+    body["granted"]["agent_tools"] = json!(["example.nope"]);
+    let (status, answer) = call(&router, "POST", "/api/plugins", &admin, Some(body)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
+    let silent = manifest().replace("agent_tools = [\"example.items\"]", "agent_tools = [\"example.fetch\"]");
+    let mut body = install_body();
+    body["manifest"] = json!(silent);
+    body["granted"]["agent_tools"] = json!(["example.fetch"]);
+    let (status, answer) = call(&router, "POST", "/api/plugins", &admin, Some(body)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
+    assert!(answer["error"].as_str().unwrap().contains("description"), "{answer}");
+}
