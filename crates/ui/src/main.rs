@@ -256,7 +256,7 @@ fn Sidebar(on_add: EventHandler<()>) -> Element {
     let mut refresh = use_signal(|| 0u32);
     // Session whose close button was pressed and is waiting for an answer.
     let mut closing = use_signal(|| None::<String>);
-    // The list of tmux windows that can be opened is showing.
+    // The list of tmux panes that can be opened is showing.
     let mut tmux_open = use_signal(|| false);
     let mut view = shell.view;
     let mut sessions = use_signal(Vec::<SessionInfo>::new);
@@ -433,14 +433,14 @@ fn Sidebar(on_add: EventHandler<()>) -> Element {
             if inbox_counts() != Value::Null {
                 button {
                     class: if tmux_open() { "toggle on from-tmux" } else { "toggle from-tmux" },
-                    title: "Open a window of the tmux server on the server's machine",
+                    title: "Open a pane of the tmux server on the server's machine",
                     aria_expanded: tmux_open(),
                     onclick: move |_| tmux_open.set(!tmux_open()),
-                    "Open a tmux window"
+                    "Open a tmux pane"
                 }
             }
             if tmux_open() {
-                tmux::TmuxWindows { on_done: move |_| { tmux_open.set(false); refresh += 1; } }
+                tmux::TmuxPanes { on_done: move |_| { tmux_open.set(false); refresh += 1; } }
             }
             if !online() {
                 p { class: "hint", "Server not reachable at {shell.server}" }

@@ -701,44 +701,39 @@ fn start_session(app: &App, who: &Principal, req: CreateSession) -> ApiResult {
     Ok(Json(json!(info)))
 }
 
-/// Windows of the tmux server on this machine that can be opened as sessions.
+/// Panes of the tmux server on this machine that can be opened as sessions.
 async fn tmux_list(Extension(who): Who) -> ApiResult {
     need_role(&who, Role::Member)?;
-    let windows = tokio::task::spawn_blocking(crate::tmux::list).await.map_err(|e| bad(e.to_string()))?;
-    Ok(Json(match windows {
-        Ok(windows) => json!({ "available": true, "windows": windows }),
-        Err(reason) => json!({ "available": false, "reason": reason, "windows": [] }),
+    let panes = tokio::task::spawn_blocking(crate::tmux::list).await.map_err(|e| bad(e.to_string()))?;
+    Ok(Json(match panes {
+        Ok(panes) => json!({ "available": true, "panes": panes }),
+        Err(reason) => json!({ "available": false, "reason": reason, "panes": [] }),
     }))
 }
 
 #[derive(Deserialize)]
 struct AdoptReq {
-    /// tmux's id of the session (`$3`) or its name.
-    session: String,
-    window: u32,
-    #[serde(default)]
-    cols: Option<u16>,
-    #[serde(default)]
-    rows: Option<u16>,
+    /// tmux's id of the pane (`%3`), `session:window.pane`, or
+    /// `session:window` for a window with one pane.
+    pane: String,
 }
 
-/// Opens one tmux window as a session. Nothing in the window is restarted.
+/// Opens one tmux pane as a session. Nothing in the pane is restarted.
 async fn tmux_adopt(State(app): State<App>, Extension(who): Who, Json(req): Json<AdoptReq>) -> ApiResult {
     need_role(&who, Role::Member)?;
-    let windows = tokio::task::spawn_blocking(crate::tmux::list).await.map_err(|e| bad(e.to_string()))?.map_err(bad)?;
-    // Only a window tmux itself listed: the target never comes from the caller's text.
-    let window = windows
-        .iter()
-        .find(|w| (w.session_id == req.session || w.session == req.session) && w.index == req.window)
-        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, format!("no tmux window {}:{}", req.session, req.window)))?;
-    let unique: String = rand::random::<[u8; 4]>().iter().map(|b| format!("{b:02x}")).collect();
+    let panes = tokio::task::spawn_blocking(crate::tmux::list).await.map_err(|e| bad(e.to_string()))?.map_err(bad)?;
+    // Only a pane tmux itself listed: the target never comes from the caller's text.
+    let pane = crate::tmux::find(&panes, &req.pane)
+        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, format!("no tmux pane {}", req.pane)))?;
+    let exe = crate::tmux::exe().map_err(bad)?;
     let create = CreateSession {
-        command: crate::tmux::adopt_command(window, &unique),
+        command: crate::tmux::adopt_command(&exe, pane),
         cwd: None,
         env: HashMap::new(),
-        cols: req.cols,
-        rows: req.rows,
-        title: Some(crate::tmux::title(window)),
+        // The pane's own size, until a client attaches with another one.
+        cols: Some(pane.cols),
+        rows: Some(pane.rows),
+        title: Some(crate::tmux::title(pane)),
     };
     start_session(&app, &who, create)
 }

@@ -123,10 +123,9 @@ client disconnects (tmux-like). Any number of clients attach to one session.
   (raw byte stream; the app's panel is just another attached client).
 - `almighty run -- claude` started in your own terminal registers the session
   with the server, so it shows up in the app and on mobile.
-- tmux adapter: windows of the tmux server on the server's machine are listed
+- tmux adapter: panes of the tmux server on the server's machine are listed
   and opened as sessions without restarting them (`almighty tmux`, or "Open a
-  tmux window" in the app). Each one is a tmux client inside a session; a
-  control-mode adapter with one session per pane is not built.
+  tmux pane" in the app). One session per pane, through tmux's control mode.
 
 Rich mode (inline media, link handling, explainer) exists only in the app
 clients; a plain terminal gets the plain stream.
