@@ -218,6 +218,7 @@ impl Store {
     }
 
     pub fn secret_set(&self, plugin: &str, name: &str, value: &str) -> Result<()> {
+        let value = seal(&self.secret_key, value)?;
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO plugin_secrets(plugin, name, value, set_at) VALUES(?1, ?2, ?3, ?4)
@@ -233,11 +234,14 @@ impl Store {
     }
 
     pub fn secret_get(&self, plugin: &str, name: &str) -> Option<String> {
-        let conn = self.conn.lock().unwrap();
-        conn.query_row("SELECT value FROM plugin_secrets WHERE plugin = ?1 AND name = ?2", params![plugin, name], |r| r.get(0))
-            .optional()
-            .ok()
-            .flatten()
+        let stored: String = {
+            let conn = self.conn.lock().unwrap();
+            conn.query_row("SELECT value FROM plugin_secrets WHERE plugin = ?1 AND name = ?2", params![plugin, name], |r| r.get(0))
+                .optional()
+                .ok()
+                .flatten()?
+        };
+        open(&self.secret_key, &stored)
     }
 
     /// Names only; values never leave the server.
@@ -341,6 +345,49 @@ impl Store {
             })
         });
         rows.map(|it| it.flatten().collect()).unwrap_or_default()
+    }
+}
+
+const SEALED: &str = "enc1:";
+
+/// XChaCha20-Poly1305 with a random nonce: `enc1:<base64 nonce + ciphertext>`.
+fn seal(key: &[u8; 32], plain: &str) -> Result<String> {
+    use base64::Engine;
+    use chacha20poly1305::aead::{Aead, KeyInit};
+    let nonce: [u8; 24] = rand::random();
+    let cipher = chacha20poly1305::XChaCha20Poly1305::new(key.into());
+    let mut out = nonce.to_vec();
+    out.extend(cipher.encrypt((&nonce).into(), plain.as_bytes()).map_err(|_| anyhow::anyhow!("cannot encrypt the secret"))?);
+    Ok(format!("{SEALED}{}", base64::engine::general_purpose::STANDARD.encode(out)))
+}
+
+/// `None` when the value was sealed with another key or is damaged.
+fn open(key: &[u8; 32], stored: &str) -> Option<String> {
+    use base64::Engine;
+    use chacha20poly1305::aead::{Aead, KeyInit};
+    let bytes = base64::engine::general_purpose::STANDARD.decode(stored.strip_prefix(SEALED)?).ok()?;
+    if bytes.len() < 24 {
+        return None;
+    }
+    let (nonce, sealed) = bytes.split_at(24);
+    let cipher = chacha20poly1305::XChaCha20Poly1305::new(key.into());
+    String::from_utf8(cipher.decrypt(nonce.into(), sealed).ok()?).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn secrets_are_sealed_at_rest() {
+        let store = Store::in_memory().unwrap();
+        store.secret_set("a.b", "TOKEN", "s3cret").unwrap();
+        assert_eq!(store.secret_get("a.b", "TOKEN").as_deref(), Some("s3cret"));
+        let raw: String = store.conn.lock().unwrap().query_row("SELECT value FROM plugin_secrets", [], |r| r.get(0)).unwrap();
+        assert!(raw.starts_with(SEALED) && !raw.contains("s3cret"));
+        // Another key (a restored database without its key file) reads nothing.
+        assert_eq!(open(&[7; 32], &raw), None);
+        assert_eq!(open(&store.secret_key, "enc1:AAAA"), None);
     }
 }
 

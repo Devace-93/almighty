@@ -90,6 +90,8 @@ pub struct AuditEntry {
 
 pub struct Store {
     pub(crate) conn: Mutex<Connection>,
+    /// Encrypts plugin secrets at rest; kept in a file next to the database.
+    pub(crate) secret_key: [u8; 32],
 }
 
 const SCHEMA: &str = "
@@ -133,6 +135,26 @@ fn new_token(kind: &str) -> String {
     format!("alm_{kind}_{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
 }
 
+/// Reads the key that encrypts secrets, creating it on first use. Without
+/// this file the stored secrets cannot be read: back it up apart from the
+/// database, or set the secrets again after restoring.
+fn load_secret_key(path: &Path) -> Result<[u8; 32]> {
+    if let Ok(bytes) = std::fs::read(path) {
+        return <[u8; 32]>::try_from(bytes.as_slice()).map_err(|_| anyhow::anyhow!("{} is not a 32-byte key", path.display()));
+    }
+    let key: [u8; 32] = rand::random();
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    use std::io::Write;
+    options.open(path).and_then(|mut f| f.write_all(&key)).with_context(|| format!("create {}", path.display()))?;
+    Ok(key)
+}
+
 pub fn valid_user_name(name: &str) -> bool {
     (1..=64).contains(&name.len()) && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '@'))
 }
@@ -148,20 +170,20 @@ impl Store {
             use std::os::unix::fs::PermissionsExt;
             let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
         }
-        Self::init(conn)
+        Self::init(conn, load_secret_key(&path.with_file_name("secret.key"))?)
     }
 
     pub fn in_memory() -> Result<Store> {
-        Self::init(Connection::open_in_memory()?)
+        Self::init(Connection::open_in_memory()?, rand::random())
     }
 
-    fn init(conn: Connection) -> Result<Store> {
+    fn init(conn: Connection, secret_key: [u8; 32]) -> Result<Store> {
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
         conn.execute_batch(SCHEMA)?;
         conn.execute_batch(crate::plugins::db::SCHEMA)?;
         // Terminal sessions do not survive a restart, so neither do their tokens.
         conn.execute("DELETE FROM tokens WHERE kind = 'agent'", [])?;
-        Ok(Store { conn: Mutex::new(conn) })
+        Ok(Store { conn: Mutex::new(conn), secret_key })
     }
 
     pub fn workspace_name(&self) -> String {

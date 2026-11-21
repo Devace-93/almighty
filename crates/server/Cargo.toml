@@ -32,6 +32,7 @@ wasmtime = { version = "51", default-features = false, features = ["runtime", "c
 wasmtime-wasi = { version = "51", default-features = false, features = ["p2"] }
 toml = "1"
 ureq = "3"
+chacha20poly1305 = "0.10"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
