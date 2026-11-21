@@ -42,7 +42,8 @@ pub struct Loaded {
     pub checksum: String,
     pub installed_at: u64,
     pub enabled: bool,
-    component: Component,
+    /// `None` for service plugins, which run on their own.
+    component: Option<Component>,
     /// One call at a time per plugin.
     busy: Mutex<()>,
     pub status: Mutex<Status>,
@@ -67,6 +68,10 @@ impl Loaded {
         let status = self.status.lock().unwrap().clone();
         json!({
             "id": self.manifest.id,
+            "kind": self.manifest.kind,
+            "base_url": self.manifest.service.as_ref().map(|s| s.base_url.clone()),
+            "mcp_url": self.manifest.service.as_ref().and_then(|s| Some(format!("{}{}", s.base_url, s.mcp.as_ref()?))),
+            "resources": self.manifest.resources,
             "name": self.manifest.name,
             "version": self.manifest.version,
             "license": self.manifest.license,
@@ -159,12 +164,15 @@ impl Plugins {
                 if granted != manifest.permissions {
                     return Err("stored approval does not match the manifest".into());
                 }
+                if manifest.kind == "service" {
+                    return Ok(self.loaded_from(manifest, row.checksum.clone(), row.installed_at, row.enabled, None));
+                }
                 let bytes = std::fs::read(self.dir_of(&row.id).join(COMPONENT_FILE)).map_err(|e| e.to_string())?;
                 if sha256_hex(&bytes) != row.checksum {
                     return Err("component file does not match the installed checksum".into());
                 }
                 let component = Component::new(&self.engine, &bytes).map_err(|e| format!("{e:#}"))?;
-                Ok(self.loaded_from(manifest, row.checksum.clone(), row.installed_at, row.enabled, component))
+                Ok(self.loaded_from(manifest, row.checksum.clone(), row.installed_at, row.enabled, Some(component)))
             })();
             match loaded {
                 Ok(l) => {
@@ -175,7 +183,7 @@ impl Plugins {
         }
     }
 
-    fn loaded_from(&self, manifest: Manifest, checksum: String, installed_at: u64, enabled: bool, component: Component) -> Loaded {
+    fn loaded_from(&self, manifest: Manifest, checksum: String, installed_at: u64, enabled: bool, component: Option<Component>) -> Loaded {
         Loaded {
             manifest,
             checksum,
@@ -191,20 +199,27 @@ impl Plugins {
     /// Installs or updates a plugin. `granted` is what the admin approved; it
     /// has to be exactly what the manifest asks for, so a new version that
     /// wants more cannot slip in under an old approval.
-    pub fn install(&self, manifest_text: &str, component: &[u8], granted: &Permissions, by: &str) -> Result<Arc<Loaded>, String> {
+    pub fn install(&self, manifest_text: &str, component: Option<&[u8]>, granted: &Permissions, by: &str) -> Result<Arc<Loaded>, String> {
         let manifest = Manifest::parse(manifest_text)?;
         if *granted != manifest.permissions {
             return Err("the approved permissions do not match the manifest".into());
         }
-        if component.len() > MAX_COMPONENT_BYTES {
-            return Err("component is too large".into());
-        }
-        let compiled =
-            Component::new(&self.engine, component).map_err(|e| format!("not a valid WebAssembly component: {e:#}"))?;
-        let checksum = sha256_hex(component);
+        let (compiled, checksum) = match (manifest.kind.as_str(), component) {
+            ("service", None) => (None, sha256_hex(manifest_text.as_bytes())),
+            ("service", Some(_)) => return Err("a service plugin has no component".into()),
+            (_, None) => return Err("the component is missing".into()),
+            (_, Some(bytes)) if bytes.len() > MAX_COMPONENT_BYTES => return Err("component is too large".into()),
+            (_, Some(bytes)) => {
+                let compiled =
+                    Component::new(&self.engine, bytes).map_err(|e| format!("not a valid WebAssembly component: {e:#}"))?;
+                (Some(compiled), sha256_hex(bytes))
+            }
+        };
         let dir = self.dir_of(&manifest.id);
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-        std::fs::write(dir.join(COMPONENT_FILE), component).map_err(|e| e.to_string())?;
+        if let Some(bytes) = component {
+            std::fs::write(dir.join(COMPONENT_FILE), bytes).map_err(|e| e.to_string())?;
+        }
         std::fs::write(dir.join(MANIFEST_FILE), manifest_text).map_err(|e| e.to_string())?;
         let granted_json = serde_json::to_string(granted).map_err(|e| e.to_string())?;
         self.store
@@ -310,7 +325,8 @@ impl Plugins {
                 format!("the plugin crashed: {}", text.lines().next().unwrap_or(""))
             }
         };
-        let instance = host::Plugin::instantiate(&mut store, &plugin.component, &self.linker).map_err(trap)?;
+        let component = plugin.component.as_ref().ok_or("this is a service plugin: it runs on its own and has no calls")?;
+        let instance = host::Plugin::instantiate(&mut store, component, &self.linker).map_err(trap)?;
         let text = |v: &Value| v.to_string();
         match call {
             Call::Poll => instance.call_poll(&mut store).map_err(trap)?.map(|()| Value::Null),
@@ -344,7 +360,7 @@ impl Plugins {
         let now = now_secs();
         self.list()
             .into_iter()
-            .filter(|p| p.enabled && p.manifest.poll_seconds() > 0)
+            .filter(|p| p.enabled && p.component.is_some() && p.manifest.poll_seconds() > 0)
             .filter(|p| {
                 let every = p.manifest.poll_seconds().max(30);
                 p.status.lock().unwrap().last_poll.is_none_or(|last| now >= last + every)

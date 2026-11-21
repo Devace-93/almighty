@@ -1,0 +1,40 @@
+# crew: agent roles, skills and prompts. A service plugin: the app runs on its own (here on its
+# local development port); almighty embeds its pages and exchanges signed events.
+# Change base_url to where your instance listens.
+id = "net.3m4.crew"
+name = "crew"
+version = "0.1.0"
+kind = "service"
+license = "MIT"
+
+[service]
+base_url = "http://localhost:8088"
+well_known = "/.well-known/m4.json"
+mcp = "/mcp"
+
+[permissions]
+items = ["write"]
+
+[[panels]]
+id = "agents"
+title = "Agents"
+type = "web"
+url = "/embed/agents"
+
+[[panels]]
+id = "skills"
+title = "Skills"
+type = "web"
+url = "/embed/skills"
+
+[[resources]]
+type = "skills"
+embed = "/embed/skills/{id}"
+
+[[resources]]
+type = "prompts"
+embed = "/embed/prompts/{id}"
+
+[[resources]]
+type = "agents"
+embed = "/embed/agents/{id}"

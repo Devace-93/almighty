@@ -22,7 +22,9 @@ pub struct Browser {
 }
 
 fn same_page(a: &str, b: &str) -> bool {
-    a.trim_end_matches('/') == b.trim_end_matches('/')
+    // The identity token of a service page changes on every open; the page is the same.
+    let page = |url: &str| url.split("#almighty_token=").next().unwrap_or(url).trim_end_matches('/').to_string();
+    page(a) == page(b)
 }
 
 impl Browser {

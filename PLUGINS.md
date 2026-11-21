@@ -3,8 +3,8 @@
 **Status.** Light (WebAssembly) plugins are implemented: manifest,
 permissions, storage, secrets, outbound HTTP, items, connectors, declarative
 panels and commands. The interface is `wit/plugin.wit`; `plugins/example` is
-the smallest plugin; `plugins/github`, `plugins/slack` and `plugins/gmail` are connectors. Still a draft, not
-built yet: service plugins, triage rules, item actions, agent tools, agent
+the smallest plugin; `plugins/github`, `plugins/slack` and `plugins/gmail` are connectors. Service plugins are implemented on almighty's side (see
+"Service plugins" below). Still a draft, not built yet: triage rules, item actions, agent tools, agent
 adapters, terminal access from plugins, events, `llm`, `notify`, web panels,
 and installing from a git URL or a registry. Sections below mark what exists.
 
@@ -140,13 +140,63 @@ Implemented in `wit/plugin.wit`: `log`, `config`, `secret`, `kv-get/set/delete`,
 - `notify`: request a notification (the server still applies user thresholds)
 - `log`
 
-## Service plugins and the 3m4 platform
+## Service plugins (implemented on almighty's side)
 
-Service plugins authenticate calls from almighty with a workspace-issued
-token (JWT, audience = plugin id) verified against almighty's JWKS; 3m4 apps
-keep accepting `accounts.3m4.net` sessions when they run standalone. Events
-flow both ways as HMAC-signed webhooks (flows/CONTRACT.md §5). Resource URIs
-(`3m4://<type>/<id>@v`) are opened by the plugin that registered the type.
+A service plugin is a separate process with its own UI and API; its manifest
+has `kind = "service"` and no component. `plugins/3m4/` holds manifests for
+flows, crew, sketch, blueprint and trace.
+
+```toml
+kind = "service"
+
+[service]
+base_url = "http://localhost:8087"   # where the service listens
+mcp = "/mcp"                         # shown to the person; not proxied yet
+events_url = "/api/v1/events"        # where almighty posts events (default)
+
+[permissions]
+items = ["write"]                    # may create inbox items through events
+events = ["item.created"]            # events almighty sends it: item.created, item.updated
+
+[[panels]]
+id = "runs"
+title = "Runs"
+type = "web"
+url = "/embed/runs"                  # a path on the service
+
+[[resources]]                        # 3m4://workflows/<id>[@version] opens here
+type = "workflows"
+embed = "/embed/workflows/{id}"
+```
+
+- **Pages.** A web panel opens the service's page in the side browser, on
+  the service's own origin. Nothing from it runs inside almighty's page.
+- **Who is looking.** The URL carries `#almighty_token=<JWT>` (a fragment:
+  not sent to servers or written to their logs). The token is signed with
+  the workspace's Ed25519 key (`alg: EdDSA`), lives five minutes and has
+  `iss` (the server URL), `aud` (the plugin id), `sub` (user name), `role`
+  and `workspace`. The public key is at `GET /.well-known/jwks.json`, so the
+  service verifies it without calling back. A service must check `aud`.
+- **Events, both ways**, signed with a secret shown once when the plugin is
+  installed (`almighty plugin rotate-events-secret <id>` replaces it):
+  `X-Almighty-Signature: sha256=<hex HMAC-SHA256 of the body>` and
+  `X-Almighty-Event-Id` (the same id on every retry). The `X-3m4-*` header
+  names of the 3m4 platform contract are accepted on the way in.
+  - Service → almighty: `POST /hooks/<plugin id>` with
+    `{"type": "...", "uri": "...", "item": {…optional, see Items…}}`.
+    Answers `202`; a repeated id is acknowledged and ignored.
+  - almighty → service: `POST <base_url><events_url>` with
+    `{"type": "item.created", "at", "workspace", "actor", "data": {id,
+    source, kind, state, title, url}}` — the light version, never the body.
+    Three attempts, then dropped. A service does not get its own items back.
+- **Resource links.** `GET /api/resolve?uri=3m4://<type>/<id>[@version]`
+  returns the page of the plugin that registered the type.
+
+Not built yet: merging a service's MCP tools into the workspace endpoint,
+the postMessage protocol of flows/CONTRACT.md §7 (`ready`, `resize`,
+`saved`, `theme`…), fetching `well_known`, opening `3m4://` links from the
+client, and a delivery queue that survives restarts. 3m4 apps keep accepting
+`accounts.3m4.net` sessions when they run standalone.
 
 ## Distribution
 

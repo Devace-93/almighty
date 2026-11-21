@@ -35,6 +35,8 @@ pub enum PluginCmd {
         #[arg(long)]
         delete: bool,
     },
+    /// Replace the secret a service plugin signs events with (shown once).
+    RotateEventsSecret { id: String },
     /// Run the plugin's connector now.
     Poll { id: String },
     /// Print the tree of a panel as JSON.
@@ -78,9 +80,14 @@ async fn add(client: &Client, path: &Path, yes: bool) -> Result<()> {
     let dir = manifest_path.parent().unwrap_or(Path::new(".")).to_path_buf();
     let text = std::fs::read_to_string(&manifest_path).with_context(|| format!("read {}", manifest_path.display()))?;
     let manifest = Manifest::parse(&text).map_err(anyhow::Error::msg)?;
-    let component_path = dir.join(&manifest.wasm.as_ref().context("no [wasm] table")?.component);
-    let component = std::fs::read(&component_path)
-        .with_context(|| format!("read {} (build the plugin first)", component_path.display()))?;
+    // A service plugin is only its manifest; a light plugin also uploads its component.
+    let component = match &manifest.wasm {
+        Some(wasm) if manifest.kind == "wasm" => {
+            let path = dir.join(&wasm.component);
+            Some(std::fs::read(&path).with_context(|| format!("read {} (build the plugin first)", path.display()))?)
+        }
+        _ => None,
+    };
 
     // What is installed now, to point out what a new version adds.
     let before: Option<Permissions> = client
@@ -89,6 +96,9 @@ async fn add(client: &Client, path: &Path, yes: bool) -> Result<()> {
         .ok()
         .and_then(|v| serde_json::from_value(v["permissions"].clone()).ok());
     eprintln!("{} {} ({})", manifest.name, manifest.version, manifest.id);
+    if let Some(service) = &manifest.service {
+        eprintln!("Service at {} (runs on its own; almighty embeds its pages and exchanges signed events)", service.base_url);
+    }
     eprintln!("Permissions it asks for:");
     for (label, value) in describe(&manifest.permissions) {
         eprintln!("  {label}: {value}");
@@ -101,13 +111,16 @@ async fn add(client: &Client, path: &Path, yes: bool) -> Result<()> {
     if !yes && !confirm("Install with these permissions?")? {
         bail!("not installed");
     }
-    let body = json!({
-        "manifest": text,
-        "component": base64::engine::general_purpose::STANDARD.encode(&component),
-        "granted": manifest.permissions,
-    });
+    let mut body = json!({ "manifest": text, "granted": manifest.permissions });
+    if let Some(bytes) = &component {
+        body["component"] = json!(base64::engine::general_purpose::STANDARD.encode(bytes));
+    }
     let v = client.post("/api/plugins", body).await?;
     println!("Installed {} {}", v["id"].as_str().unwrap_or(""), v["version"].as_str().unwrap_or(""));
+    if let Some(secret) = v["events_secret"].as_str() {
+        eprintln!("Event secret (shown once; give it to the service so both sides can sign events):");
+        println!("{secret}");
+    }
     let missing: Vec<&String> = manifest
         .permissions
         .secrets
@@ -163,6 +176,10 @@ pub async fn run(client: &Client, cmd: PluginCmd) -> Result<()> {
                 client.post(&path, json!({ "value": value.trim() })).await?;
                 println!("Secret {name} stored");
             }
+        }
+        PluginCmd::RotateEventsSecret { id } => {
+            let v = client.post(&format!("/api/plugins/{id}/events-secret"), json!({})).await?;
+            println!("{}", v["events_secret"].as_str().unwrap_or(""));
         }
         PluginCmd::Poll { id } => {
             client.post(&format!("/api/plugins/{id}/poll"), json!({})).await?;

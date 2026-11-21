@@ -186,6 +186,7 @@ impl Store {
             let _ = conn.execute(&format!("ALTER TABLE items ADD COLUMN {column}"), []);
         }
         conn.execute_batch(crate::triage::SCHEMA)?;
+        conn.execute_batch(crate::service::SCHEMA)?;
         // Terminal sessions do not survive a restart, so neither do their tokens.
         conn.execute("DELETE FROM tokens WHERE kind = 'agent'", [])?;
         Ok(Store { conn: Mutex::new(conn), secret_key })

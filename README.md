@@ -218,7 +218,8 @@ Summary; the contract is [`PLUGINS.md`](PLUGINS.md).
    notifications on desktop; Gmail and Slack connectors (IMAP needs a socket capability).
 5. **Review + explainer + side browser + rich terminal mode** (first slice done, see docs/m5.md): risk map and
    diff of a pull request with an optional model summary, "explain selection", inline images in terminals.
-6. **Service plugins**: manifest, embed panels, flows as the first one, then
+6. **Service plugins** (almighty's side done, see docs/m6.md; the five apps do not exist yet): manifest, pages in the
+   side browser with a signed identity token, signed events both ways, resource links; manifests for flows,
    crew, trace, sketch, blueprint.
 7. **Mobile**: light layout, push, multi-workspace switcher.
 8. **OIDC**, team roles, install skills for company deployments.
@@ -249,7 +250,8 @@ First plugin (needs `rustup target add wasm32-wasip2`):
 # then list repositories in <data dir>/workspace.toml, see plugins/github/README.md
 ```
 
-Notes: [`docs/m5.md`](docs/m5.md) (review, explainer, inline images),
+Notes: [`docs/m6.md`](docs/m6.md) (service plugins),
+[`docs/m5.md`](docs/m5.md) (review, explainer, inline images),
 [`docs/m4.md`](docs/m4.md) (inbox, triage, Slack and Gmail connectors),
 [`docs/m3.md`](docs/m3.md) (plugin host, GitHub connector),
 [`docs/m2.md`](docs/m2.md) (terminal history, copy/paste, session tree),

@@ -414,9 +414,35 @@ fn Sidebar(on_add: EventHandler<()>) -> Element {
                         li { key: "{p.plugin}/{p.panel}",
                             button {
                                 class: if matches!(view(), Some(View::Panel(a, b, _)) if a == p.plugin && b == p.panel) { "row active" } else { "row" },
+                                title: if p.web_url.is_some() { "Opens in the side panel" } else { "" },
                                 onclick: {
                                     let p = p.clone();
-                                    move |_| view.set(Some(View::Panel(p.plugin.clone(), p.panel.clone(), p.title.clone())))
+                                    move |_| {
+                                        let p = p.clone();
+                                        async move {
+                                            let Some(url) = p.web_url.clone() else {
+                                                view.set(Some(View::Panel(p.plugin, p.panel, p.title)));
+                                                return;
+                                            };
+                                            // A service's page runs on its own origin: it opens next to the
+                                            // work, with a short-lived token that says who is looking. The
+                                            // token travels in the fragment, which is not sent to servers.
+                                            let server = shell.server.peek().clone();
+                                            let token = api_post(&server, &format!("/api/plugins/{}/token", p.plugin), json!({}))
+                                                .await
+                                                .and_then(|v| v["token"].as_str().map(str::to_string));
+                                            let url = match token {
+                                                Some(token) => format!("{url}#almighty_token={token}"),
+                                                None => url,
+                                            };
+                                            if HAS_SIDE_BROWSER {
+                                                let mut browser = shell.browser;
+                                                browser.write().open_url(&url);
+                                            } else {
+                                                open_external(&url);
+                                            }
+                                        }
+                                    }
                                 },
                                 span { class: "title", "{p.title}" }
                                 span { class: "kind", "{p.plugin_name}" }

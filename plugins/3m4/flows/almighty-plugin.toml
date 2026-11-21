@@ -1,0 +1,37 @@
+# flows: workflows, triggers and runs. A service plugin: the app runs on its own (here on its
+# local development port); almighty embeds its pages and exchanges signed events.
+# Change base_url to where your instance listens.
+id = "net.3m4.flows"
+name = "flows"
+version = "0.1.0"
+kind = "service"
+license = "MIT"
+
+[service]
+base_url = "http://localhost:8087"
+well_known = "/.well-known/m4.json"
+mcp = "/mcp"
+
+[permissions]
+items = ["write"]
+events = ["item.created"]
+
+[[panels]]
+id = "workflows"
+title = "Workflows"
+type = "web"
+url = "/embed/workflows"
+
+[[panels]]
+id = "runs"
+title = "Runs"
+type = "web"
+url = "/embed/runs"
+
+[[resources]]
+type = "workflows"
+embed = "/embed/workflows/{id}"
+
+[[resources]]
+type = "runs"
+embed = "/embed/runs/{id}"

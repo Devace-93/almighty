@@ -15,6 +15,11 @@ pub struct Manifest {
     #[serde(default)]
     pub wasm: Option<Wasm>,
     #[serde(default)]
+    pub service: Option<Service>,
+    /// Resource types this plugin opens (`3m4://<type>/<id>`).
+    #[serde(default)]
+    pub resources: Vec<Resource>,
+    #[serde(default)]
     pub permissions: Permissions,
     #[serde(default)]
     pub connector: Option<Connector>,
@@ -30,6 +35,28 @@ pub struct Manifest {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Wasm {
     pub component: String,
+}
+
+/// A separate process that speaks HTTP: its own UI, API and MCP endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Service {
+    /// Where the service listens, e.g. `http://localhost:8087`.
+    pub base_url: String,
+    #[serde(default)]
+    pub well_known: Option<String>,
+    #[serde(default)]
+    pub mcp: Option<String>,
+    /// Path that receives almighty's events; default `/api/v1/events`.
+    #[serde(default)]
+    pub events_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Resource {
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// Path of the embeddable view, with `{id}` where the resource id goes.
+    pub embed: String,
 }
 
 /// Everything is denied unless listed.
@@ -68,6 +95,9 @@ pub struct Panel {
     pub title: String,
     #[serde(rename = "type", default = "declarative")]
     pub kind: String,
+    /// `type = "web"` only: path of the page on the service.
+    #[serde(default)]
+    pub url: Option<String>,
 }
 
 fn declarative() -> String {
@@ -86,6 +116,11 @@ fn valid_id(id: &str) -> bool {
         && id.split('.').all(|part| {
             !part.is_empty() && part.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
         })
+}
+
+/// A path on the service itself: no scheme, no host, no way up.
+fn valid_path(path: &str) -> bool {
+    path.starts_with('/') && !path.starts_with("//") && !path.contains("..") && !path.contains(['\\', ' ', '\n', '#']) && path.len() <= 300
 }
 
 fn valid_name(name: &str) -> bool {
@@ -111,7 +146,20 @@ impl Manifest {
         match m.kind.as_str() {
             "wasm" if m.wasm.is_some() => {}
             "wasm" => return Err("manifest: kind \"wasm\" needs a [wasm] table".into()),
-            "service" => return Err("service plugins are not supported yet".into()),
+            "service" => {
+                let service = m.service.as_ref().ok_or("manifest: kind \"service\" needs a [service] table")?;
+                let url = &service.base_url;
+                if !(url.starts_with("https://") || url.starts_with("http://")) || url.ends_with('/') || url.contains(['?', '#', ' ']) {
+                    return Err("manifest: service.base_url must be an http(s) URL without a trailing slash".into());
+                }
+                let paths = [&service.well_known, &service.mcp, &service.events_url];
+                if paths.into_iter().flatten().any(|p| !valid_path(p)) {
+                    return Err("manifest: service paths must start with / and stay on the service".into());
+                }
+                if m.connector.is_some() || m.review.is_some() || !m.commands.is_empty() {
+                    return Err("manifest: connectors, commands and review are for wasm plugins".into());
+                }
+            }
             other => return Err(format!("manifest: unknown kind {other:?}")),
         }
         let p = &m.permissions;
@@ -125,11 +173,22 @@ impl Manifest {
         if let Some(bad) = p.network.iter().find(|h| !valid_host_pattern(h)) {
             return Err(format!("manifest: {bad:?} is not a host name"));
         }
-        if let Some(bad) = p.secrets.iter().find(|s| !valid_name(s)) {
+        if let Some(bad) = p.secrets.iter().find(|s| !valid_name(s) || s.starts_with("__")) {
             return Err(format!("manifest: {bad:?} is not a valid secret name"));
         }
-        if let Some(bad) = m.panels.iter().find(|p| !valid_name(&p.id) || p.kind != "declarative") {
-            return Err(format!("manifest: panel {:?} must have a simple id and type \"declarative\"", bad.id));
+        let web_ok = |p: &Panel| m.kind == "service" && p.kind == "web" && p.url.as_deref().is_some_and(valid_path);
+        let declarative_ok = |p: &Panel| m.kind == "wasm" && p.kind == "declarative" && p.url.is_none();
+        if let Some(bad) = m.panels.iter().find(|p| !valid_name(&p.id) || !(web_ok(p) || declarative_ok(p))) {
+            return Err(format!(
+                "manifest: panel {:?} must have a simple id and be \"declarative\" (wasm) or \"web\" with a url (service)",
+                bad.id
+            ));
+        }
+        if let Some(bad) = m.resources.iter().find(|r| m.kind != "service" || !valid_name(&r.kind) || !valid_path(&r.embed) || !r.embed.contains("{id}")) {
+            return Err(format!("manifest: resource {:?} needs a service plugin and an embed path with {{id}}", bad.kind));
+        }
+        if !known(&p.events, &["item.created", "item.updated"]) {
+            return Err("manifest: permissions.events accepts \"item.created\" and \"item.updated\"".into());
         }
         if let Some(bad) = m.commands.iter().find(|c| !valid_name(&c.id)) {
             return Err(format!("manifest: command id {:?} is not valid", bad.id));
@@ -176,7 +235,16 @@ mod tests {
         assert!(!m.permissions.allows_host("api.example.com.evil.net"));
 
         assert!(Manifest::parse(&BASE.replace("net.example.a", "Bad Id")).is_err());
-        assert!(Manifest::parse(&BASE.replace("\"wasm\"", "\"service\"")).is_err());
+        assert!(Manifest::parse(&BASE.replace("\"wasm\"", "\"service\"")).is_err(), "a service needs [service]");
+        let service = "id = \"net.example.s\"\nname = \"s\"\nversion = \"1\"\nkind = \"service\"\n[service]\nbase_url = \"http://localhost:8087\"\n";
+        let m = Manifest::parse(&format!("{service}[[panels]]\nid = \"runs\"\ntitle = \"Runs\"\ntype = \"web\"\nurl = \"/embed/runs\"\n[[resources]]\ntype = \"workflows\"\nembed = \"/embed/workflows/{{id}}\"\n")).unwrap();
+        assert_eq!(m.panels[0].url.as_deref(), Some("/embed/runs"));
+        assert!(Manifest::parse(&service.replace("8087", "8087/")).is_err());
+        assert!(Manifest::parse(&format!("{service}[[panels]]\nid = \"x\"\ntitle = \"X\"\ntype = \"web\"\nurl = \"//evil.example/x\"\n")).is_err());
+        assert!(Manifest::parse(&format!("{service}[[panels]]\nid = \"x\"\ntitle = \"X\"\ntype = \"web\"\nurl = \"https://evil.example/x\"\n")).is_err());
+        assert!(Manifest::parse(&format!("{service}[[panels]]\nid = \"x\"\ntitle = \"X\"\n")).is_err(), "declarative panels need a wasm plugin");
+        assert!(Manifest::parse(&format!("{service}[connector]\npoll_seconds = 60\n")).is_err());
+        assert!(Manifest::parse(&format!("{service}[permissions]\nevents = [\"everything\"]\n")).is_err());
         assert!(Manifest::parse(&format!("{BASE}[permissions]\nitems = [\"delete\"]\n")).is_err());
         assert!(Manifest::parse(&format!("{BASE}[permissions]\nnetwork = [\"https://x\"]\n")).is_err());
         assert!(Manifest::parse(&format!("{BASE}[[panels]]\nid = \"p\"\ntitle = \"P\"\ntype = \"web\"\n")).is_err());

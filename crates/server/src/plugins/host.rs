@@ -175,7 +175,7 @@ impl Host for Ctx {
     }
 
     fn query_items(&mut self, query: String) -> Result<String, String> {
-        let mut query: ItemQuery = if query.trim().is_empty() {
+        let mut query: ItemQuery = if query.trim().is_empty() || query.trim() == "null" {
             ItemQuery::default()
         } else {
             serde_json::from_str(&query).map_err(|e| format!("query: {e}"))?

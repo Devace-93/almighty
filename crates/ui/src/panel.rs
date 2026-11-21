@@ -16,6 +16,8 @@ pub struct PanelRef {
     pub panel: String,
     pub title: String,
     pub plugin_name: String,
+    /// Web panels of service plugins: the page to open. `None` for declarative panels.
+    pub web_url: Option<String>,
 }
 
 /// Panels of the enabled plugins, ordered by the user's `layout.toml`:
@@ -33,6 +35,10 @@ pub fn panel_list(plugins: &Value, layout: &Value) -> Vec<PanelRef> {
                 panel: panel["id"].as_str().unwrap_or_default().to_string(),
                 title: panel["title"].as_str().unwrap_or_default().to_string(),
                 plugin_name: p["name"].as_str().unwrap_or_default().to_string(),
+                web_url: match (panel["type"].as_str(), p["base_url"].as_str(), panel["url"].as_str()) {
+                    (Some("web"), Some(base), Some(path)) => Some(format!("{base}{path}")),
+                    _ => None,
+                },
             });
         }
     }
@@ -301,6 +307,11 @@ mod tests {
         let titles = |layout: Value| panel_list(&plugins, &layout).into_iter().map(|p| p.title).collect::<Vec<_>>();
         assert_eq!(titles(json!({})), ["One", "Two", "X"]);
         assert_eq!(titles(json!({ "panels": ["c.d/x"], "hidden": ["a.b/one"] })), ["X", "Two"]);
+
+        let service = json!([{ "id": "s.v", "name": "sv", "enabled": true, "base_url": "http://localhost:8087",
+            "panels": [{ "id": "runs", "title": "Runs", "type": "web", "url": "/embed/runs" }] }]);
+        assert_eq!(panel_list(&service, &json!({}))[0].web_url.as_deref(), Some("http://localhost:8087/embed/runs"));
+        assert_eq!(panel_list(&plugins, &json!({}))[0].web_url, None);
     }
 
     #[test]

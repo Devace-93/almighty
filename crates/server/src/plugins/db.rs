@@ -265,7 +265,7 @@ impl Store {
     /// Names only; values never leave the server.
     pub fn secret_names(&self, plugin: &str) -> Vec<String> {
         let conn = self.conn.lock().unwrap();
-        let Ok(mut stmt) = conn.prepare("SELECT name FROM plugin_secrets WHERE plugin = ?1 ORDER BY name") else {
+        let Ok(mut stmt) = conn.prepare("SELECT name FROM plugin_secrets WHERE plugin = ?1 AND substr(name, 1, 2) != '__' ORDER BY name") else {
             return Vec::new();
         };
         let rows = stmt.query_map(params![plugin], |r| r.get(0));

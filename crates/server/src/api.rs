@@ -70,6 +70,7 @@ pub struct AppState {
     pub store: Arc<Store>,
     pub plugins: Arc<Plugins>,
     pub triage: crate::triage::Triage,
+    pub signer: crate::service::Signer,
     /// Needed to create the first owner over the API; printed at start-up.
     pub setup_code: String,
     sessions: RwLock<HashMap<String, Arc<Session>>>,
@@ -173,12 +174,14 @@ pub fn build(config: Config, store: Store) -> (Router, App) {
     let code: [u8; 5] = rand::random();
     let store = Arc::new(store);
     let plugins = Plugins::new(&config.data_dir, store.clone(), events.clone()).expect("plugin host");
+    let signer = crate::service::Signer::new(&config.data_dir);
     let triage = crate::triage::Triage { store: store.clone(), data_dir: config.data_dir.clone(), events: events.clone() };
     let app: App = Arc::new(AppState {
         config,
         store,
         plugins,
         triage,
+        signer,
         setup_code: code.iter().map(|b| format!("{b:02x}")).collect(),
         sessions: RwLock::new(HashMap::new()),
         next_id: AtomicU64::new(1),
@@ -188,6 +191,11 @@ pub fn build(config: Config, store: Store) -> (Router, App) {
     });
     let router = Router::new()
         .route("/api/health", get(|| async { Json(json!({ "ok": true })) }))
+        .route("/.well-known/jwks.json", get(jwks))
+        .route("/hooks/{plugin}", post(plugin_event))
+        .route("/api/plugins/{id}/token", post(plugin_token))
+        .route("/api/plugins/{id}/events-secret", post(rotate_events_secret))
+        .route("/api/resolve", get(resolve_uri))
         .route("/api/workspace", get(workspace))
         .route("/api/setup", post(setup))
         .route("/api/auth/login", post(login))
@@ -252,6 +260,8 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     let (router, app) = build(config, store);
     crate::plugins::spawn_scheduler(app.plugins.clone());
     crate::triage::spawn_worker(app.triage.clone());
+    let names = app.clone();
+    crate::service::spawn_outbound(app.plugins.clone(), app.store.clone(), app.triage.events.clone(), move || names.store.workspace_name());
     eprintln!("almightyd listening on {} (data: {})", app.config.url(), app.config.data_dir.display());
     if app.store.user_count() == 0 {
         eprintln!("No users yet. Create the owner with `almighty user add <name> --role owner`,");
@@ -261,10 +271,11 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     Ok(())
 }
 
-const PUBLIC: &[&str] = &["/api/health", "/api/workspace", "/api/setup", "/api/auth/login"];
+const PUBLIC: &[&str] = &["/api/health", "/api/workspace", "/api/setup", "/api/auth/login", "/.well-known/jwks.json"];
 
 async fn auth(State(app): State<App>, mut req: Request, next: Next) -> Response {
-    if req.method() == Method::OPTIONS || PUBLIC.contains(&req.uri().path()) {
+    // Hooks authenticate with a signature over the body, checked in the handler.
+    if req.method() == Method::OPTIONS || PUBLIC.contains(&req.uri().path()) || req.uri().path().starts_with("/hooks/") {
         return next.run(req).await;
     }
     let bearer = req
@@ -1019,8 +1030,9 @@ fn scroll_request(text: &str, current: usize) -> Option<usize> {
 #[derive(Deserialize)]
 struct InstallReq {
     manifest: String,
-    /// The component, base64.
-    component: String,
+    /// The component, base64. Absent for service plugins.
+    #[serde(default)]
+    component: Option<String>,
     /// The permissions the admin saw and approved.
     granted: Permissions,
 }
@@ -1058,19 +1070,27 @@ async fn get_plugin(State(app): State<App>, Extension(who): Who, Path(id): Path<
 async fn install_plugin(State(app): State<App>, Extension(who): Who, Json(req): Json<InstallReq>) -> ApiResult {
     let (_, name) = need_role(&who, Role::Admin)?;
     use base64::Engine;
-    let component = base64::engine::general_purpose::STANDARD
-        .decode(req.component.as_bytes())
-        .map_err(|_| bad("component must be base64"))?;
+    let component = match &req.component {
+        Some(text) => Some(base64::engine::general_purpose::STANDARD.decode(text.as_bytes()).map_err(|_| bad("component must be base64"))?),
+        None => None,
+    };
     let by = name.to_string();
     let plugins = app.plugins.clone();
     // Compiling the component takes a moment.
-    let loaded = tokio::task::spawn_blocking(move || plugins.install(&req.manifest, &component, &req.granted, &by))
+    let loaded = tokio::task::spawn_blocking(move || plugins.install(&req.manifest, component.as_deref(), &req.granted, &by))
         .await
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .map_err(bad)?;
     let detail = format!("{} {} {}", loaded.manifest.id, loaded.manifest.version, json!(loaded.manifest.permissions));
     app.store.audit(&who.label(), None, "plugin.install", &detail);
-    Ok(Json(plugin_json(&app, &loaded)))
+    let mut out = plugin_json(&app, &loaded);
+    if loaded.manifest.kind == "service" {
+        // Shown once, at first install: the service needs it to sign and check events.
+        if let (secret, true) = app.store.events_secret(&loaded.manifest.id) {
+            out["events_secret"] = json!(secret);
+        }
+    }
+    Ok(Json(out))
 }
 
 async fn remove_plugin(State(app): State<App>, Extension(who): Who, Path(id): Path<String>) -> ApiResult {
@@ -1188,6 +1208,106 @@ async fn layout(State(app): State<App>, Extension(who): Who) -> ApiResult {
         Err(_) => toml::Table::new(),
     };
     Ok(Json(json!(value)))
+}
+
+// ---- service plugins ----
+
+async fn jwks(State(app): State<App>) -> Json<Value> {
+    Json(app.signer.jwks())
+}
+
+fn need_service(app: &App, id: &str) -> Result<Arc<crate::plugins::Loaded>, ApiError> {
+    let plugin = need_plugin(app, id)?;
+    if plugin.manifest.service.is_none() {
+        return Err(bad(format!("{id} is not a service plugin")));
+    }
+    if !plugin.enabled {
+        return Err(bad(format!("plugin {id} is disabled")));
+    }
+    Ok(plugin)
+}
+
+/// A short-lived token that tells one service plugin who is looking.
+async fn plugin_token(State(app): State<App>, Extension(who): Who, Path(id): Path<String>) -> ApiResult {
+    let (_, name) = need_role(&who, Role::Guest)?;
+    need_service(&app, &id)?;
+    let role = match &who {
+        Principal::User { role, .. } => role.as_str(),
+        Principal::Agent { .. } => "agent",
+    };
+    let token = app.signer.token(&app.config.url(), &id, name, role, &app.store.workspace_name());
+    Ok(Json(json!({ "token": token, "expires_in": crate::service::TOKEN_TTL })))
+}
+
+/// Replaces the shared event secret; the new one is shown once.
+async fn rotate_events_secret(State(app): State<App>, Extension(who): Who, Path(id): Path<String>) -> ApiResult {
+    need_role(&who, Role::Admin)?;
+    need_service(&app, &id)?;
+    app.store.secret_delete(&id, crate::service::EVENTS_SECRET);
+    let (secret, _) = app.store.events_secret(&id);
+    app.store.audit(&who.label(), None, "plugin.events-secret.rotate", &id);
+    Ok(Json(json!({ "events_secret": secret })))
+}
+
+/// Events from a service plugin, signed with the shared secret:
+/// `X-Almighty-Signature: sha256=<hmac of the body>` and
+/// `X-Almighty-Event-Id` (repeats are acknowledged and ignored). The
+/// `X-3m4-*` names of the 3m4 platform contract are accepted too.
+async fn plugin_event(State(app): State<App>, Path(id): Path<String>, headers: axum::http::HeaderMap, body: Bytes) -> Result<Response, ApiError> {
+    let unknown = || ApiError(StatusCode::UNAUTHORIZED, "unknown plugin or bad signature".into());
+    let header = |a: &str, b: &str| headers.get(a).or_else(|| headers.get(b)).and_then(|v| v.to_str().ok()).map(str::to_string);
+    // The same answer for a missing plugin and a wrong signature.
+    let plugin = app.plugins.get(&id).filter(|p| p.enabled && p.manifest.service.is_some()).ok_or_else(unknown)?;
+    let secret = app.store.secret_get(&id, crate::service::EVENTS_SECRET).ok_or_else(unknown)?;
+    let signature = header("x-almighty-signature", "x-3m4-signature").ok_or_else(unknown)?;
+    if !crate::service::verify(&secret, &body, &signature) {
+        return Err(unknown());
+    }
+    let event: Value = serde_json::from_slice(&body).map_err(|_| bad("the event is not JSON"))?;
+    let kind = event["type"].as_str().filter(|t| !t.is_empty() && t.len() <= 100).ok_or_else(|| bad("the event has no type"))?;
+    let event_id = header("x-almighty-event-id", "x-3m4-event-id").filter(|e| !e.is_empty() && e.len() <= 200).ok_or_else(|| bad("the event has no id header"))?;
+    let accepted = |extra: Value| Ok((StatusCode::ACCEPTED, Json(extra)).into_response());
+    if !app.store.event_is_new(&id, &event_id) {
+        return accepted(json!({ "ok": true, "duplicate": true }));
+    }
+    let mut out = json!({ "ok": true });
+    if !event["item"].is_null() {
+        if !plugin.manifest.permissions.items.iter().any(|p| p == "write") {
+            return Err(forbidden("the plugin has no permission to write items"));
+        }
+        let item: crate::plugins::db::NewItem = serde_json::from_value(event["item"].clone()).map_err(|e| bad(format!("item: {e}")))?;
+        let (item_id, created) = app.store.item_upsert(&id, &item).map_err(bad)?;
+        app.emit(json!({ "type": "item", "id": item_id, "created": created, "plugin": id }));
+        out["item"] = json!(item_id);
+    }
+    // Lets open panels of this plugin refresh.
+    app.emit(json!({ "type": "plugin", "id": id, "event": kind, "uri": event["uri"] }));
+    accepted(out)
+}
+
+/// Finds the service plugin that opens a `3m4://<type>/<id>[@version]` resource.
+async fn resolve_uri(State(app): State<App>, Extension(who): Who, Query(q): Query<HashMap<String, String>>) -> ApiResult {
+    need_role(&who, Role::Guest)?;
+    let uri = q.get("uri").map(String::as_str).unwrap_or("");
+    let parsed = uri.strip_prefix("3m4://").and_then(|rest| rest.split_once('/')).map(|(kind, rest)| match rest.split_once('@') {
+        Some((id, version)) => (kind, id, Some(version)),
+        None => (kind, rest, None),
+    });
+    let plain = |s: &str| !s.is_empty() && s.len() <= 120 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    let Some((kind, id, version)) = parsed.filter(|(k, i, v)| plain(k) && plain(i) && v.is_none_or(plain)) else {
+        return Err(bad("expected 3m4://<type>/<id>[@version]"));
+    };
+    for plugin in app.plugins.list() {
+        let (Some(service), true) = (&plugin.manifest.service, plugin.enabled) else { continue };
+        if let Some(resource) = plugin.manifest.resources.iter().find(|r| r.kind == kind) {
+            let mut url = format!("{}{}", service.base_url, resource.embed.replace("{id}", id));
+            if let Some(version) = version {
+                url.push_str(&format!("{}version={version}", if url.contains('?') { '&' } else { '?' }));
+            }
+            return Ok(Json(json!({ "plugin": plugin.manifest.id, "name": plugin.manifest.name, "url": url })));
+        }
+    }
+    Err(ApiError(StatusCode::NOT_FOUND, format!("no installed plugin opens {kind} resources")))
 }
 
 // ---- rich terminal, review, explainer ----

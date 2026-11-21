@@ -1,0 +1,26 @@
+# blueprint: diagrams with text sources. A service plugin: the app runs on its own (here on its
+# local development port); almighty embeds its pages and exchanges signed events.
+# Change base_url to where your instance listens.
+id = "net.3m4.blueprint"
+name = "blueprint"
+version = "0.1.0"
+kind = "service"
+license = "MIT"
+
+[service]
+base_url = "http://localhost:8090"
+well_known = "/.well-known/m4.json"
+mcp = "/mcp"
+
+[permissions]
+items = ["write"]
+
+[[panels]]
+id = "diagrams"
+title = "Diagrams"
+type = "web"
+url = "/embed/diagrams"
+
+[[resources]]
+type = "diagrams"
+embed = "/embed/diagrams/{id}"
