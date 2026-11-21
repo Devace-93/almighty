@@ -234,3 +234,66 @@ async fn a_session_gets_its_own_token_and_cannot_be_given_another() {
     call(&router, "DELETE", &format!("/api/sessions/{id}"), Some(&user), None).await;
     assert_eq!(call(&router, "GET", "/api/auth/me", Some(&token), None).await.0, StatusCode::UNAUTHORIZED);
 }
+
+#[tokio::test]
+async fn scrollback_is_readable_in_order() {
+    if cfg!(windows) {
+        return; // uses a POSIX shell
+    }
+    let (router, app) = app();
+    app.store.create_user("ana", PASSWORD, Role::Owner).unwrap();
+    let user = login(&router, "ana").await;
+    let req = json!({ "command": ["sh", "-c", "seq 1 100; echo done-marker; sleep 5"], "cols": 40, "rows": 10 });
+    let (_, s) = call(&router, "POST", "/api/sessions", Some(&user), Some(req)).await;
+    let id = s["id"].as_str().unwrap();
+    let wait = json!({ "pattern": "^done-marker$", "timeout_ms": 5000 });
+    call(&router, "POST", &format!("/api/sessions/{id}/wait"), Some(&user), Some(wait)).await;
+
+    // Without the parameter there is no history in the answer.
+    let (_, plain) = call(&router, "GET", &format!("/api/sessions/{id}/screen"), Some(&user), None).await;
+    assert!(plain.get("scrollback").is_none());
+    assert_eq!(plain["scrollback_len"], 92, "100 numbers + marker + cursor line on a 10-row screen");
+    let screen: Vec<&str> = plain["text"].as_str().unwrap().lines().collect();
+    assert_eq!(screen.first(), Some(&"93"));
+
+    // The last 5 history lines are the ones just above the screen.
+    let (_, some) = call(&router, "GET", &format!("/api/sessions/{id}/screen?scrollback=5"), Some(&user), None).await;
+    assert_eq!(some["scrollback"], "88\n89\n90\n91\n92");
+    // Asking for more than exists returns everything, oldest first.
+    let (_, all) = call(&router, "GET", &format!("/api/sessions/{id}/screen?scrollback=5000"), Some(&user), None).await;
+    let lines: Vec<&str> = all["scrollback"].as_str().unwrap().lines().collect();
+    assert_eq!(lines.len(), 92);
+    assert_eq!((lines[0], lines[91]), ("1", "92"));
+    // Reading history does not leave the session scrolled.
+    let (_, after) = call(&router, "GET", &format!("/api/sessions/{id}/screen"), Some(&user), None).await;
+    assert_eq!(after["text"], plain["text"]);
+    call(&router, "DELETE", &format!("/api/sessions/{id}"), Some(&user), None).await;
+}
+
+#[tokio::test]
+async fn background_sessions_keep_running_out_of_the_list() {
+    let (router, app) = app();
+    app.store.create_user("ana", PASSWORD, Role::Owner).unwrap();
+    app.store.create_user("gus", PASSWORD, Role::Guest).unwrap();
+    let (user, guest) = (login(&router, "ana").await, login(&router, "gus").await);
+    let (_, s) = call(&router, "POST", "/api/sessions", Some(&user), Some(shell())).await;
+    let id = s["id"].as_str().unwrap();
+    assert_eq!(s["background"], false);
+    let path = format!("/api/sessions/{id}/background");
+    assert_eq!(call(&router, "POST", &path, Some(&guest), Some(json!({ "background": true }))).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(call(&router, "POST", &path, Some(&user), Some(json!({ "background": true }))).await.0, StatusCode::OK);
+
+    let count = |v: &Value| v["sessions"].as_array().unwrap().len();
+    assert_eq!(count(&call(&router, "GET", "/api/sessions", Some(&user), None).await.1), 0);
+    let (_, all) = call(&router, "GET", "/api/sessions?all=1", Some(&user), None).await;
+    assert_eq!(count(&all), 1);
+    assert_eq!(all["sessions"][0]["background"], true);
+    // Still alive and reachable by id.
+    let (status, info) = call(&router, "GET", &format!("/api/sessions/{id}"), Some(&user), None).await;
+    assert_eq!((status, &info["exited"]), (StatusCode::OK, &json!(false)));
+    assert_eq!(call(&router, "POST", &format!("/api/sessions/{id}/input"), Some(&user), Some(json!({ "text": "x" }))).await.0, StatusCode::OK);
+
+    assert_eq!(call(&router, "POST", &path, Some(&user), Some(json!({ "background": false }))).await.0, StatusCode::OK);
+    assert_eq!(count(&call(&router, "GET", "/api/sessions", Some(&user), None).await.1), 1);
+    call(&router, "DELETE", &format!("/api/sessions/{id}"), Some(&user), None).await;
+}

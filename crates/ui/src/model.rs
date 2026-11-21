@@ -9,6 +9,44 @@ pub struct SessionInfo {
     pub exited: bool,
     pub locked: bool,
     pub agents: usize,
+    #[serde(default)]
+    pub exit_code: Option<u32>,
+    /// `user:<name>` or `agent:<session id>`.
+    #[serde(default)]
+    pub created_by: String,
+    /// What the signed-in user may do: `read` or `write`.
+    #[serde(default)]
+    pub access: String,
+}
+
+/// Sessions in display order with their depth: a terminal opened by the
+/// agent of another session is listed under that session.
+pub fn session_tree(sessions: &[SessionInfo]) -> Vec<(SessionInfo, usize)> {
+    fn add(parent: Option<&str>, depth: usize, all: &[SessionInfo], out: &mut Vec<(SessionInfo, usize)>) {
+        for s in all {
+            let owner = s.created_by.strip_prefix("agent:").filter(|p| all.iter().any(|o| o.id == *p && o.id != s.id));
+            if owner == parent {
+                out.push((s.clone(), depth));
+                // Depth is capped so a malformed cycle cannot recurse forever.
+                if depth < 8 {
+                    add(Some(&s.id), depth + 1, all, out);
+                }
+            }
+        }
+    }
+    let mut out = Vec::with_capacity(sessions.len());
+    add(None, 0, sessions, &mut out);
+    out
+}
+
+/// Exit status as people expect to read it: small codes in decimal, Windows
+/// NTSTATUS-style codes in hex.
+pub fn exit_label(code: Option<u32>) -> String {
+    match code {
+        None => "exited".to_string(),
+        Some(c) if c >= 0x8000_0000 => format!("exited 0x{c:08X}"),
+        Some(c) => format!("exited {c}"),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -56,6 +94,13 @@ pub struct Grid {
     pub exited: bool,
     #[serde(default)]
     pub locked: bool,
+    #[serde(default)]
+    pub exit_code: Option<u32>,
+    /// Lines scrolled up into the history (0 = live).
+    #[serde(default)]
+    pub offset: usize,
+    #[serde(default)]
+    pub scrollback_len: usize,
     #[serde(default)]
     pub lines: Vec<Vec<Run>>,
 }
@@ -231,6 +276,21 @@ mod tests {
             ]
         );
         assert_eq!(split_links("(Docs.RS/serde)")[1], host("Docs.RS/serde", "docs.rs"));
+    }
+
+    #[test]
+    fn tree_and_exit_labels() {
+        let s = |id: &str, by: &str| SessionInfo {
+            id: id.into(), title: id.into(), cols: 80, rows: 24, exited: false, locked: false, agents: 0,
+            exit_code: None, created_by: by.into(), access: "write".into(),
+        };
+        let all = vec![s("s1", "user:ana"), s("s2", "agent:s1"), s("s3", "user:ana"), s("s4", "agent:s2"), s("s5", "agent:s9")];
+        let order: Vec<(String, usize)> = session_tree(&all).into_iter().map(|(s, d)| (s.id, d)).collect();
+        // s5's parent is gone, so it is shown at the top level.
+        assert_eq!(order, vec![("s1".into(), 0), ("s2".into(), 1), ("s4".into(), 2), ("s3".into(), 0), ("s5".into(), 0)]);
+        assert_eq!(exit_label(Some(0)), "exited 0");
+        assert_eq!(exit_label(Some(3221225786)), "exited 0xC000013A");
+        assert_eq!(exit_label(None), "exited");
     }
 
     #[test]

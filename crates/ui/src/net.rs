@@ -73,7 +73,7 @@ pub fn default_server() -> String {
     "http://127.0.0.1:8092".to_string()
 }
 
-/// Empties a text field by element id. The one place the UI runs JavaScript:
+/// Empties a text field by element id. JavaScript is confined to this file:
 /// an uncontrolled field cannot be cleared from Rust without replacing the
 /// element, which would close the on-screen keyboard.
 pub async fn clear_field(id: &str) -> Result<(), dioxus::document::EvalError> {
@@ -136,4 +136,20 @@ pub fn storage_set(key: &str, value: &str) {
 #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))]
 fn storage_path(key: &str) -> Option<std::path::PathBuf> {
     Some(dirs::config_dir()?.join("almighty").join(format!("{key}.json")))
+}
+
+/// Copies the current text selection to the clipboard.
+pub async fn copy_selection() {
+    let _ = dioxus::document::eval(
+        "const t = window.getSelection().toString(); if (t) { await navigator.clipboard.writeText(t); } return true;",
+    )
+    .await;
+}
+
+/// Text on the clipboard, if the platform lets the page read it.
+pub async fn read_clipboard() -> Option<String> {
+    let value = dioxus::document::eval("try { return await navigator.clipboard.readText(); } catch (e) { return null; }")
+        .await
+        .ok()?;
+    value.as_str().map(str::to_string).filter(|t| !t.is_empty())
 }

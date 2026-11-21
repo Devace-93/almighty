@@ -210,7 +210,7 @@ Summary; the contract is [`PLUGINS.md`](PLUGINS.md).
    terminal; Claude Code subagent tree from hooks.
 1. **Server skeleton** (done, see docs/m1.md): workspaces, local auth, tokens, SQLite, WebSocket
    protocol, `almighty` CLI (`serve`, `attach`, `run`, `term`).
-2. **Terminals**: sessions, multi-client attach, agent tree, control MCP
+2. **Terminals** (done except the tmux adapter, see docs/m2.md): sessions, multi-client attach, agent tree, control MCP
    tools with key encoding, human-priority lock, desktop client panel.
 3. **Plugin host**: WASM runtime, permissions, declarative panels, config
    files; first light plugin (GitHub connector).
@@ -240,7 +240,8 @@ Other machines sign in with `almighty login --name <you>` (set `ALMIGHTY_URL`).
 Accounts can also be created locally with `almighty user add <name> --role member`.
 Data lives in `ALMIGHTY_DATA` (default: the user data directory, `almighty/almighty.db`).
 
-Notes: [`docs/m1.md`](docs/m1.md) (accounts, tokens, permissions),
+Notes: [`docs/m2.md`](docs/m2.md) (terminal history, copy/paste, session tree),
+[`docs/m1.md`](docs/m1.md) (accounts, tokens, permissions),
 [`docs/spikes/m0.md`](docs/spikes/m0.md) (spike findings).
 
 ## License

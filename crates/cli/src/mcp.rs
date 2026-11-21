@@ -27,8 +27,11 @@ fn tools() -> Value {
         },
         {
             "name": "terminal_read",
-            "description": "Read the rendered screen of a session as text (what a person sees), with cursor position.",
-            "inputSchema": { "type": "object", "required": ["session"], "properties": { "session": session } }
+            "description": "Read the rendered screen of a session as text (what a person sees), with cursor position. Set scrollback_lines to also get output that already scrolled off the top.",
+            "inputSchema": { "type": "object", "required": ["session"], "properties": {
+                "session": session,
+                "scrollback_lines": { "type": "integer", "description": "Lines of history to include above the screen (default 0, max 10000)" }
+            } }
         },
         {
             "name": "terminal_send_text",
@@ -75,7 +78,10 @@ async fn call_tool(client: &Client, name: &str, args: &Value) -> Result<Value> {
     match name {
         "terminal_list" => client.get("/api/sessions").await,
         "terminal_create" => client.post("/api/sessions", args.clone()).await,
-        "terminal_read" => client.get(&path("/screen")).await,
+        "terminal_read" => {
+            let lines = args["scrollback_lines"].as_u64().unwrap_or(0);
+            client.get(&path(&format!("/screen?scrollback={lines}"))).await
+        }
         "terminal_send_text" => client.post(&path("/input"), json!({ "text": args["text"] })).await,
         "terminal_send_keys" => client.post(&path("/input"), json!({ "keys": args["keys"] })).await,
         "terminal_wait" => {
@@ -145,7 +151,15 @@ fn render(tool: &str, v: &Value) -> String {
             if tool == "terminal_wait" {
                 head = format!("reason: {} | {head}", v["reason"].as_str().unwrap_or(""));
             }
-            format!("{head}\n---\n{}", s["text"].as_str().unwrap_or(""))
+            let history = match s["scrollback"].as_str().filter(|h| !h.is_empty()) {
+                Some(h) => format!("{h}\n--- screen ---\n"),
+                None => String::new(),
+            };
+            format!(
+                "{head} | history lines available: {}\n---\n{history}{}",
+                s["scrollback_len"],
+                s["text"].as_str().unwrap_or("")
+            )
         }
         None => v.to_string(),
     }

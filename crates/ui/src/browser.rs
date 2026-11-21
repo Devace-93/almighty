@@ -165,7 +165,7 @@ pub fn LinkedText(pieces: Vec<Piece>) -> Element {
 }
 
 #[component]
-fn Icon(name: &'static str) -> Element {
+pub(crate) fn Icon(name: &'static str) -> Element {
     let paths: &[&str] = match name {
         "external" => &["M15 3h6v6", "M10 14 21 3", "M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"],
         "close" => &["M18 6 6 18", "M6 6l12 12"],

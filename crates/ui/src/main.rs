@@ -33,14 +33,13 @@ use futures_channel::mpsc::UnboundedReceiver;
 use serde_json::{json, Value};
 
 use account::{Accounts, ConnectScreen};
-use browser::{Browser, BrowserPanel, LinkedText};
-use model::{split_links, AgentNode, Grid, Piece, Run, SessionInfo, TranscriptLine};
+use browser::{Browser, BrowserPanel, Icon, LinkedText};
+use model::{exit_label, session_tree, split_links, AgentNode, Grid, Piece, Run, SessionInfo, TranscriptLine};
 
 const CSS: Asset = asset!("/assets/main.css");
 const ICON: Asset = asset!("/assets/icon.svg");
 
-/// Approximate cell size of the terminal font (13px monospace). Good enough
-/// for the spike; the real client must measure the font.
+/// Cell width used until the terminal font has been measured.
 const CELL_W: f64 = 7.83;
 const CELL_H: f64 = 17.0;
 
@@ -95,6 +94,14 @@ async fn api_post(server: &str, path: &str, body: Value) -> Option<Value> {
         return None;
     }
     res.json().await.ok()
+}
+
+async fn api_delete(server: &str, path: &str) -> bool {
+    let token = TOKEN.peek().clone();
+    match reqwest::Client::new().delete(format!("{server}{path}")).bearer_auth(token).send().await {
+        Ok(res) => res.status().is_success(),
+        Err(_) => false,
+    }
 }
 
 /// `Some(false)` when the server says the token is no longer valid, `None`
@@ -183,6 +190,8 @@ fn Sidebar(on_add: EventHandler<()>) -> Element {
     let shell = use_context::<Shell>();
     let mut accounts = shell.accounts;
     let mut refresh = use_signal(|| 0u32);
+    // Session whose close button was pressed and is waiting for an answer.
+    let mut closing = use_signal(|| None::<String>);
     let mut view = shell.view;
     let mut sessions = use_signal(Vec::<SessionInfo>::new);
     let mut agents = use_signal(Vec::<AgentNode>::new);
@@ -307,18 +316,99 @@ fn Sidebar(on_add: EventHandler<()>) -> Element {
                 p { class: "hint", "Server not reachable at {shell.server}" }
             }
             ul { class: "sessions",
-                for s in sessions() {
+                for (s, depth) in session_tree(&sessions()) {
                     li { key: "{s.id}",
-                        button {
-                            class: if selected.as_deref() == Some(s.id.as_str()) && selected_agent.is_none() { "row active" } else { "row" },
-                            onclick: {
-                                let id = s.id.clone();
-                                move |_| view.set(Some(View::Terminal(id.clone())))
-                            },
-                            span { class: if s.exited { "state exited" } else { "state running" } }
-                            span { class: "title", "{s.title}" }
-                            if s.agents > 0 {
-                                span { class: "badge", "{s.agents}" }
+                        div { class: "session-row", style: "padding-left: {depth * 14}px",
+                            button {
+                                class: if selected.as_deref() == Some(s.id.as_str()) && selected_agent.is_none() { "row active" } else { "row" },
+                                title: if s.exited { exit_label(s.exit_code) } else { s.created_by.clone() },
+                                onclick: {
+                                    let id = s.id.clone();
+                                    move |_| view.set(Some(View::Terminal(id.clone())))
+                                },
+                                span { class: if s.exited { "state exited" } else { "state running" } }
+                                span { class: "title", "{s.title}" }
+                                if s.agents > 0 {
+                                    span { class: "badge", "{s.agents}" }
+                                }
+                            }
+                            if s.access != "read" {
+                                button {
+                                    class: "icon-button small",
+                                    aria_label: "Close session {s.title}",
+                                    title: if s.exited { "Remove from the list" } else { "Close…" },
+                                    onclick: {
+                                        let id = s.id.clone();
+                                        let exited = s.exited;
+                                        move |_| {
+                                            let id = id.clone();
+                                            async move {
+                                                // Nothing left to keep running: just remove it.
+                                                if exited {
+                                                    let server = shell.server.peek().clone();
+                                                    if api_delete(&server, &format!("/api/sessions/{id}")).await {
+                                                        if matches!(&*view.peek(), Some(View::Terminal(v)) | Some(View::Agent(v, _)) if *v == id) {
+                                                            view.set(None);
+                                                        }
+                                                        refresh += 1;
+                                                    }
+                                                } else {
+                                                    closing.set(Some(id));
+                                                }
+                                            }
+                                        }
+                                    },
+                                    Icon { name: "close" }
+                                }
+                            }
+                        }
+                        if closing().as_deref() == Some(s.id.as_str()) {
+                            div { class: "close-ask", role: "group", aria_label: "Close {s.title}",
+                                span { "Still running. What should happen to it?" }
+                                div { class: "close-actions",
+                                    button {
+                                        class: "toggle",
+                                        title: "The process keeps running; the session leaves this list",
+                                        onclick: {
+                                            let id = s.id.clone();
+                                            move |_| {
+                                                let id = id.clone();
+                                                async move {
+                                                    let server = shell.server.peek().clone();
+                                                    let done = api_post(&server, &format!("/api/sessions/{id}/background"), json!({ "background": true })).await.is_some();
+                                                    if done && matches!(&*view.peek(), Some(View::Terminal(v)) | Some(View::Agent(v, _)) if *v == id) {
+                                                        view.set(None);
+                                                    }
+                                                    closing.set(None);
+                                                    refresh += 1;
+                                                }
+                                            }
+                                        },
+                                        "Keep in background"
+                                    }
+                                    button {
+                                        class: "toggle danger",
+                                        title: "Ends the process",
+                                        onclick: {
+                                            let id = s.id.clone();
+                                            move |_| {
+                                                let id = id.clone();
+                                                async move {
+                                                    let server = shell.server.peek().clone();
+                                                    if api_delete(&server, &format!("/api/sessions/{id}")).await
+                                                        && matches!(&*view.peek(), Some(View::Terminal(v)) | Some(View::Agent(v, _)) if *v == id)
+                                                    {
+                                                        view.set(None);
+                                                    }
+                                                    closing.set(None);
+                                                    refresh += 1;
+                                                }
+                                            }
+                                        },
+                                        "End session"
+                                    }
+                                    button { class: "toggle", onclick: move |_| closing.set(None), "Cancel" }
+                                }
                             }
                         }
                         if selected.as_deref() == Some(s.id.as_str()) {
@@ -406,6 +496,10 @@ fn TerminalView(id: String) -> Element {
     let mut grid = use_signal(Grid::default);
     let mut connected = use_signal(|| false);
     let mut can_write = use_signal(|| true);
+    // Measured width of one character of the terminal font, in CSS pixels.
+    let mut cell_w = use_signal(|| CELL_W);
+    // Wheel movement not yet turned into whole lines.
+    let mut wheel_rest = use_signal(|| 0.0f64);
 
     let ws_id = id.clone();
     let tx = use_coroutine(move |mut rx: UnboundedReceiver<String>| {
@@ -435,7 +529,10 @@ fn TerminalView(id: String) -> Element {
                     g.cursor_visible = v["cursor_visible"].as_bool().unwrap_or(true);
                     g.title = v["title"].as_str().unwrap_or("").to_string();
                     g.exited = v["exited"].as_bool().unwrap_or(false);
+                    g.exit_code = v["exit_code"].as_u64().map(|c| c as u32);
                     g.locked = v["locked"].as_bool().unwrap_or(false);
+                    g.offset = v["offset"].as_u64().unwrap_or(0) as usize;
+                    g.scrollback_len = v["scrollback_len"].as_u64().unwrap_or(0) as usize;
                 }
             })
             .await;
@@ -444,9 +541,28 @@ fn TerminalView(id: String) -> Element {
     });
 
     let onkeydown = move |e: KeyboardEvent| {
-        // Leave browser shortcuts such as Ctrl+Shift+I and Ctrl+R alone.
         let m = e.modifiers();
-        if m.contains(Modifiers::META) || (m.contains(Modifiers::CONTROL) && m.contains(Modifiers::SHIFT)) {
+        // Terminal convention: Ctrl+Shift+C copies the selection, Ctrl+Shift+V pastes.
+        if m.contains(Modifiers::CONTROL) && m.contains(Modifiers::SHIFT) {
+            match e.key() {
+                Key::Character(c) if c.eq_ignore_ascii_case("c") => {
+                    e.prevent_default();
+                    spawn(net::copy_selection());
+                }
+                Key::Character(c) if c.eq_ignore_ascii_case("v") => {
+                    e.prevent_default();
+                    spawn(async move {
+                        if let Some(text) = net::read_clipboard().await {
+                            tx.send(json!({ "type": "input", "text": text }).to_string());
+                        }
+                    });
+                }
+                // Other Ctrl+Shift shortcuts (developer tools…) stay with the browser.
+                _ => {}
+            }
+            return;
+        }
+        if m.contains(Modifiers::META) {
             return;
         }
         if let Some(name) = key_name(&e) {
@@ -460,6 +576,8 @@ fn TerminalView(id: String) -> Element {
         "left: calc({} * var(--cell-w)); top: calc({} * var(--cell-h));",
         g.cursor_col, g.cursor_row
     );
+    let screen_style = format!("--cell-w: {}px;", cell_w());
+    let offset = g.offset;
     let locked = g.locked;
 
     rsx! {
@@ -468,7 +586,15 @@ fn TerminalView(id: String) -> Element {
                 span { class: "title", if g.title.is_empty() { "{id}" } else { "{g.title}" } }
                 span { class: "meta", "{g.cols}×{g.rows}" }
                 if g.exited {
-                    span { class: "tag", "exited" }
+                    span { class: "tag", {exit_label(g.exit_code)} }
+                }
+                if offset > 0 {
+                    button {
+                        class: "toggle on",
+                        title: "You are reading history. Jump back to the live output.",
+                        onclick: move |_| tx.send(json!({ "type": "scroll", "offset": 0 }).to_string()),
+                        "↑ {offset} lines · Latest"
+                    }
                 }
                 if !connected() {
                     span { class: "tag", "disconnected" }
@@ -490,7 +616,7 @@ fn TerminalView(id: String) -> Element {
                 onkeydown,
                 onresize: move |e: ResizeEvent| {
                     if let Ok(size) = e.get_content_box_size() {
-                        let cols = ((size.width - 16.0) / CELL_W).floor().clamp(20.0, 400.0) as u16;
+                        let cols = ((size.width - 16.0) / *cell_w.peek()).floor().clamp(20.0, 400.0) as u16;
                         let rows = ((size.height - 16.0) / CELL_H).floor().clamp(5.0, 200.0) as u16;
                         let current = grid.peek();
                         if cols != current.cols || rows != current.rows {
@@ -498,7 +624,36 @@ fn TerminalView(id: String) -> Element {
                         }
                     }
                 },
-                div { class: "screen",
+                onwheel: move |e: WheelEvent| {
+                    use dioxus::html::geometry::WheelDelta;
+                    // Up (negative) goes back in history: a positive offset change.
+                    let lines = match e.delta() {
+                        WheelDelta::Pixels(v) => -v.y / CELL_H,
+                        WheelDelta::Lines(v) => -v.y,
+                        WheelDelta::Pages(v) => -v.y * 20.0,
+                    };
+                    let total = *wheel_rest.peek() + lines;
+                    let whole = total.trunc();
+                    wheel_rest.set(total - whole);
+                    if whole != 0.0 {
+                        tx.send(json!({ "type": "scroll", "delta": whole as i64 }).to_string());
+                    }
+                },
+                div { class: "screen", style: "{screen_style}",
+                    // Invisible ruler: 50 characters of the terminal font.
+                    span {
+                        class: "ruler",
+                        "aria-hidden": "true",
+                        onmounted: move |e| async move {
+                            if let Ok(rect) = e.get_client_rect().await {
+                                let width = rect.size.width / 50.0;
+                                if width > 2.0 && (width - *cell_w.peek()).abs() > 0.01 {
+                                    cell_w.set(width);
+                                }
+                            }
+                        },
+                        {"M".repeat(50)}
+                    }
                     for (i, line) in g.lines.iter().enumerate() {
                         div { key: "{i}", class: "line",
                             for run in line.iter() {

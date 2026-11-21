@@ -41,6 +41,8 @@ pub struct SessionInfo {
     pub agents: usize,
     /// `user:<name>` or `agent:<session>`.
     pub created_by: String,
+    /// Still running, but taken out of the default session list.
+    pub background: bool,
 }
 
 /// Who started a session; decides which agent may drive it.
@@ -139,6 +141,7 @@ pub struct Session {
     /// Access given by a person to agents of other sessions, by session id.
     pub grants: Mutex<HashMap<String, Scope>>,
     on_change: Box<dyn Fn() + Send + Sync>,
+    background: AtomicBool,
 }
 
 #[derive(Debug, Clone)]
@@ -213,6 +216,7 @@ impl Session {
             created_by: ctx.created_by,
             grants: Mutex::new(HashMap::new()),
             on_change: ctx.on_change,
+            background: AtomicBool::new(false),
             id,
         });
 
@@ -292,7 +296,16 @@ impl Session {
             locked: self.locked.load(Ordering::SeqCst),
             agents: self.agents.lock().unwrap().len(),
             created_by: self.created_by.label(),
+            background: self.background.load(Ordering::SeqCst),
         }
+    }
+
+    pub fn background(&self) -> bool {
+        self.background.load(Ordering::SeqCst)
+    }
+
+    pub fn set_background(&self, background: bool) {
+        self.background.store(background, Ordering::SeqCst);
     }
 
     pub fn exited(&self) -> bool {
@@ -388,12 +401,48 @@ impl Session {
             exited: self.exited(),
             exit_code: self.exit_code(),
             rev: self.rev.load(Ordering::SeqCst),
+            scrollback: None,
+            scrollback_len: s.scrollback_len(),
         }
+    }
+
+    /// Up to `max_lines` of history above the screen, oldest first.
+    pub fn scrollback_text(&self, max_lines: usize) -> String {
+        let mut p = self.parser.lock().unwrap();
+        let (rows, cols) = size(p.screen());
+        let total = p.screen().scrollback_len();
+        let mut lines: Vec<String> = Vec::new();
+        // Page through the history from the oldest line down to the screen.
+        let mut offset = total.min(max_lines.div_ceil(rows as usize).saturating_mul(rows as usize).max(max_lines));
+        while offset > 0 {
+            p.screen_mut().set_scrollback(offset);
+            let take = (rows as usize).min(offset);
+            lines.extend(p.screen().rows(0, cols).take(take).map(|l| l.trim_end().to_string()));
+            offset -= take;
+        }
+        p.screen_mut().set_scrollback(0);
+        let skip = lines.len().saturating_sub(max_lines);
+        lines[skip..].join("\n")
     }
 
     /// Styled grid for clients that draw the terminal themselves.
     pub fn grid(&self) -> Grid {
-        let p = self.parser.lock().unwrap();
+        self.grid_at(0)
+    }
+
+    /// The grid as seen `offset` lines up in the history (0 = live screen).
+    /// The view is per caller: the session itself is never left scrolled.
+    pub fn grid_at(&self, offset: usize) -> Grid {
+        let mut p = self.parser.lock().unwrap();
+        let scrollback_len = p.screen().scrollback_len();
+        let offset = offset.min(scrollback_len);
+        p.screen_mut().set_scrollback(offset);
+        let grid = Self::build_grid(&p, self, offset, scrollback_len);
+        p.screen_mut().set_scrollback(0);
+        grid
+    }
+
+    fn build_grid(p: &vt100::Parser<TermEvents>, this: &Session, offset: usize, scrollback_len: usize) -> Grid {
         let s = p.screen();
         let (rows, cols) = size(s);
         let (cr, cc) = s.cursor_position();
@@ -436,11 +485,14 @@ impl Session {
             cols,
             cursor_row: cr,
             cursor_col: cc,
-            cursor_visible: !s.hide_cursor(),
+            // The cursor belongs to the live screen, not to the history.
+            cursor_visible: !s.hide_cursor() && offset == 0,
             title: p.callbacks().title.clone(),
-            exited: self.exited(),
-            exit_code: self.exit_code(),
-            locked: self.locked.load(Ordering::SeqCst),
+            exited: this.exited(),
+            exit_code: this.exit_code(),
+            locked: this.locked.load(Ordering::SeqCst),
+            offset,
+            scrollback_len,
             lines: out,
         }
     }
@@ -505,6 +557,11 @@ pub struct ScreenText {
     pub exited: bool,
     pub exit_code: Option<u32>,
     pub rev: u64,
+    /// Lines that scrolled off the top, oldest first; only when asked for.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scrollback: Option<String>,
+    /// How many lines of history exist in total.
+    pub scrollback_len: usize,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq, Default)]
@@ -542,5 +599,8 @@ pub struct Grid {
     pub exited: bool,
     pub exit_code: Option<u32>,
     pub locked: bool,
+    /// Lines scrolled up from the live screen in this view.
+    pub offset: usize,
+    pub scrollback_len: usize,
     pub lines: Vec<Vec<Run>>,
 }

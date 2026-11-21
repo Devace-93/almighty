@@ -391,3 +391,26 @@ span.link { cursor: pointer; text-decoration: underline; }
 /* Wordmark: the mark replaces "al" and touches "mighty", no gap. */
 .brand { display: inline-flex; align-items: baseline; gap: 0; font-weight: 700; letter-spacing: 0.01em; }
 .brand-mark { flex: none; height: 0.8em; width: auto; margin-right: 0.05em; }
+
+/* Session rows: the row button plus its close button */
+.session-row { display: flex; align-items: center; }
+.session-row .row { flex: 1; min-width: 0; }
+.session-row .icon-button { opacity: 0; margin-right: 8px; }
+.session-row:hover .icon-button, .session-row .icon-button:focus-visible { opacity: 1; }
+@media (any-pointer: coarse) { .session-row .icon-button { opacity: 1; } }
+
+/* Measures the terminal font without taking space */
+.ruler { position: absolute; visibility: hidden; pointer-events: none; white-space: pre; }
+
+/* Inline question shown when closing a running session */
+.close-ask {
+  margin: 2px 10px 8px 16px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  font-size: 12px;
+  color: var(--muted);
+}
+.close-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.toggle.danger { border-color: #d06060; color: #d06060; }

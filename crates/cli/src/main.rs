@@ -70,7 +70,15 @@ enum Cmd {
         scope: String,
     },
     /// List sessions.
-    Ls,
+    Ls {
+        /// Include sessions sent to the background.
+        #[arg(long, short)]
+        all: bool,
+    },
+    /// Send a session to the background (it keeps running, off the list).
+    Bg { session: String },
+    /// Bring a background session back to the list.
+    Fg { session: String },
     /// Start a command in a new session and attach this terminal to it.
     Run {
         /// Create the session without attaching.
@@ -118,7 +126,14 @@ enum TokenCmd {
 #[derive(Subcommand)]
 enum TermCmd {
     /// Print the rendered screen.
-    Read { session: String, #[arg(long)] json: bool },
+    Read {
+        session: String,
+        #[arg(long)]
+        json: bool,
+        /// Also print this many lines of history above the screen.
+        #[arg(long, default_value_t = 0)]
+        scrollback: usize,
+    },
     /// Type text (bracketed paste is used when the application enabled it).
     SendText { session: String, text: String },
     /// Press named keys: Enter, Tab, Esc, Up, C-c, M-x, F5…
@@ -304,10 +319,22 @@ async fn main() -> Result<()> {
             client.post(&format!("/api/sessions/{session}/grants"), json!({ "agent": agent, "scope": scope })).await?;
             println!("agent of {agent} -> {session}: {scope}");
         }
-        Cmd::Ls => {
-            let v = client.get("/api/sessions").await?;
+        Cmd::Bg { session } => {
+            client.post(&format!("/api/sessions/{session}/background"), json!({ "background": true })).await?;
+        }
+        Cmd::Fg { session } => {
+            client.post(&format!("/api/sessions/{session}/background"), json!({ "background": false })).await?;
+        }
+        Cmd::Ls { all } => {
+            let v = client.get(if all { "/api/sessions?all=1" } else { "/api/sessions" }).await?;
             for s in v["sessions"].as_array().into_iter().flatten() {
-                let state = if s["exited"].as_bool() == Some(true) { "exited" } else { "running" };
+                let state = if s["exited"].as_bool() == Some(true) {
+                    "exited"
+                } else if s["background"].as_bool() == Some(true) {
+                    "background"
+                } else {
+                    "running"
+                };
                 println!(
                     "{}\t{}\t{}x{}\tagents:{}\t{}",
                     s["id"].as_str().unwrap_or(""),
@@ -375,11 +402,14 @@ async fn main() -> Result<()> {
         }
         Cmd::Mcp => mcp::serve(client).await?,
         Cmd::Term { cmd } => match cmd {
-            TermCmd::Read { session, json } => {
-                let v = client.get(&format!("/api/sessions/{session}/screen")).await?;
+            TermCmd::Read { session, json, scrollback } => {
+                let v = client.get(&format!("/api/sessions/{session}/screen?scrollback={scrollback}")).await?;
                 if json {
                     println!("{}", serde_json::to_string_pretty(&v)?);
                 } else {
+                    if let Some(history) = v["scrollback"].as_str().filter(|h| !h.is_empty()) {
+                        println!("{history}");
+                    }
                     println!("{}", v["text"].as_str().unwrap_or(""));
                 }
             }

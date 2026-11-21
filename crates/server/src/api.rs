@@ -195,6 +195,7 @@ pub fn build(config: Config, store: Store) -> (Router, App) {
         .route("/api/sessions/{id}/wait", post(wait))
         .route("/api/sessions/{id}/resize", post(resize))
         .route("/api/sessions/{id}/lock", post(lock))
+        .route("/api/sessions/{id}/background", post(background))
         .route("/api/sessions/{id}/grants", get(list_grants).post(set_grant))
         .route("/api/sessions/{id}/agents", get(agents))
         .route("/api/sessions/{id}/agents/{agent_id}/transcript", get(agent_transcript))
@@ -451,12 +452,15 @@ async fn events_ws(State(app): State<App>, Extension(_who): Who, ws: WebSocketUp
 
 // ---------- terminal sessions ----------
 
-async fn list_sessions(State(app): State<App>, Extension(who): Who) -> Json<Value> {
+/// Sessions sent to the background are left out unless `?all=1`.
+async fn list_sessions(State(app): State<App>, Extension(who): Who, Query(q): Query<HashMap<String, String>>) -> Json<Value> {
+    let all = q.get("all").is_some_and(|v| v == "1" || v == "true");
     let mut list: Vec<Value> = app
         .sessions
         .read()
         .unwrap()
         .values()
+        .filter(|s| all || !s.background())
         .filter_map(|s| {
             let scope = access(&who, s)?;
             let mut info = json!(s.info());
@@ -510,8 +514,19 @@ async fn close_session(State(app): State<App>, Extension(who): Who, Path(id): Pa
     Ok(Json(json!({ "closed": id })))
 }
 
-async fn screen(State(app): State<App>, Extension(who): Who, Path(id): Path<String>) -> ApiResult {
-    Ok(Json(json!(need(&app, &who, &id, Scope::Read)?.screen_text())))
+/// `?scrollback=N` adds up to N lines of history above the screen.
+async fn screen(
+    State(app): State<App>,
+    Extension(who): Who,
+    Path(id): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+) -> ApiResult {
+    let session = need(&app, &who, &id, Scope::Read)?;
+    let mut text = session.screen_text();
+    if let Some(n) = q.get("scrollback").and_then(|n| n.parse::<usize>().ok()).filter(|n| *n > 0) {
+        text.scrollback = Some(session.scrollback_text(n.min(10_000)));
+    }
+    Ok(Json(json!(text)))
 }
 
 #[derive(Deserialize)]
@@ -641,6 +656,20 @@ async fn lock(State(app): State<App>, Extension(who): Who, Path(id): Path<String
     app.store.audit(&who.label(), Some(&id), if req.locked { "lock" } else { "unlock" }, "");
     app.emit(json!({ "type": "sessions" }));
     Ok(Json(json!({ "locked": req.locked })))
+}
+
+#[derive(Deserialize)]
+struct BackgroundReq {
+    background: bool,
+}
+
+/// Keeps a session running but out of the default list (or brings it back).
+async fn background(State(app): State<App>, Extension(who): Who, Path(id): Path<String>, Json(req): Json<BackgroundReq>) -> ApiResult {
+    let session = need(&app, &who, &id, Scope::Write)?;
+    session.set_background(req.background);
+    app.store.audit(&who.label(), Some(&id), if req.background { "background" } else { "foreground" }, "");
+    app.emit(json!({ "type": "sessions" }));
+    Ok(Json(json!({ "background": req.background })))
 }
 
 async fn list_grants(State(app): State<App>, Extension(who): Who, Path(id): Path<String>) -> ApiResult {
@@ -862,8 +891,11 @@ async fn grid_loop(socket: WebSocket, session: Arc<Session>, rights: Rights, app
     let (mut tx, mut rx) = socket.split();
     let mut rev = session.watch_rev();
     let mut prev: Option<crate::session::Grid> = None;
+    // How far up the history this client is looking; 0 follows the output.
+    let mut offset: usize = 0;
     loop {
-        let grid = session.grid();
+        let grid = session.grid_at(offset);
+        offset = grid.offset;
         let frame = match &prev {
             Some(p) if p.rows == grid.rows && p.cols == grid.cols => {
                 let changed: Vec<Value> = grid
@@ -878,6 +910,7 @@ async fn grid_loop(socket: WebSocket, session: Arc<Session>, rights: Rights, app
                     "cursor_row": grid.cursor_row, "cursor_col": grid.cursor_col,
                     "cursor_visible": grid.cursor_visible, "title": grid.title,
                     "exited": grid.exited, "exit_code": grid.exit_code, "locked": grid.locked,
+                    "offset": grid.offset, "scrollback_len": grid.scrollback_len,
                 })
             }
             _ => json!({ "type": "full", "grid": grid, "can_write": rights.write }),
@@ -895,13 +928,44 @@ async fn grid_loop(socket: WebSocket, session: Arc<Session>, rights: Rights, app
                     break;
                 }
                 msg = rx.next() => match msg {
-                    Some(Ok(Message::Text(text))) => handle_control(&app, &session, &rights, &text),
+                    Some(Ok(Message::Text(text))) => {
+                        // Scrolling is a view change for this client only.
+                        if let Some(next) = scroll_request(&text, offset) {
+                            if next != offset {
+                                offset = next;
+                                break;
+                            }
+                            continue;
+                        }
+                        // Typing returns to the live screen.
+                        if offset != 0 && text.contains("\"input\"") {
+                            offset = 0;
+                            handle_control(&app, &session, &rights, &text);
+                            break;
+                        }
+                        handle_control(&app, &session, &rights, &text)
+                    }
                     Some(Ok(Message::Close(_))) | Some(Err(_)) | None => return,
                     Some(Ok(_)) => {}
                 },
             }
         }
     }
+}
+
+/// `{"type":"scroll","delta":n}` (positive = further back) or
+/// `{"type":"scroll","offset":n}`. Returns the requested offset; the grid
+/// clamps it to the history that exists.
+fn scroll_request(text: &str, current: usize) -> Option<usize> {
+    let v: Value = serde_json::from_str(text).ok()?;
+    if v.get("type").and_then(Value::as_str) != Some("scroll") {
+        return None;
+    }
+    if let Some(offset) = v.get("offset").and_then(Value::as_u64) {
+        return Some(offset as usize);
+    }
+    let delta = v.get("delta").and_then(Value::as_i64).unwrap_or(0);
+    Some((current as i64 + delta).max(0) as usize)
 }
 
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
