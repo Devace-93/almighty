@@ -36,7 +36,8 @@ interface host {
     /// reachable; redirects are returned, not followed.
     http-fetch: func(request: http-request) -> result<http-response, string>;
 
-    /// Creates or updates an item (matched by `external_id`). Returns
+    /// Creates or updates an item (matched by `external_id`). Triage reads
+    /// the optional hints `direct`, `mentions` and `due`. Returns
     /// `{"id": "...", "created": true|false}`. Needs `items = ["write"]`.
     emit-item: func(item: string) -> result<string, string>;
 

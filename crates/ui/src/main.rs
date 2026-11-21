@@ -6,6 +6,7 @@
 
 mod account;
 mod browser;
+mod inbox;
 mod model;
 mod net;
 mod panel;
@@ -50,6 +51,7 @@ pub(crate) enum View {
     Agent(String, String),
     /// A plugin panel: plugin id, panel id, title.
     Panel(String, String, String),
+    Inbox,
 }
 
 #[derive(Clone, Copy)]
@@ -62,6 +64,8 @@ pub(crate) struct Shell {
     pub(crate) browser: Signal<Browser>,
     /// Goes up when the server reports a change in plugins or items.
     pub(crate) plugins_tick: Signal<u32>,
+    /// Goes up when the server reports a change in this person's inbox.
+    pub(crate) inbox_tick: Signal<u32>,
 }
 
 fn main() {
@@ -153,6 +157,7 @@ fn App() -> Element {
         view: use_signal(|| None),
         browser: use_signal(Browser::default),
         plugins_tick: use_signal(|| 0u32),
+        inbox_tick: use_signal(|| 0u32),
     };
     use_context_provider(|| shell);
 
@@ -201,6 +206,7 @@ fn Workbench(on_add: EventHandler<()>) -> Element {
                     Some(View::Terminal(id)) => rsx! { TerminalView { key: "{id}", id } },
                     Some(View::Agent(sid, aid)) => rsx! { AgentView { key: "{sid}-{aid}", session: sid, agent: aid } },
                     Some(View::Panel(plugin, panel, title)) => rsx! { panel::PanelView { key: "{plugin}/{panel}", plugin, panel, title } },
+                    Some(View::Inbox) => rsx! { inbox::InboxView {} },
                     None => rsx! { div { class: "empty", "Pick a session, or start a new terminal." } },
                 }
             }
@@ -223,6 +229,18 @@ fn Sidebar(on_add: EventHandler<()>) -> Element {
     let mut agents = use_signal(Vec::<AgentNode>::new);
     let mut online = use_signal(|| true);
     let mut plugins_tick = shell.plugins_tick;
+    let mut inbox_tick = shell.inbox_tick;
+    let mut inbox_counts = use_signal(|| Value::Null);
+
+    use_resource(move || async move {
+        let _ = inbox_tick();
+        let server = shell.server.peek().clone();
+        // Guests have no inbox: the row stays hidden for them.
+        let counts = api_get(&server, "/api/inbox/counts").await.unwrap_or(Value::Null);
+        if *inbox_counts.peek() != counts {
+            inbox_counts.set(counts);
+        }
+    });
     let mut panels = use_signal(Vec::<panel::PanelRef>::new);
 
     // Panels of installed plugins, in the order of the user's layout file.
@@ -246,6 +264,14 @@ fn Sidebar(on_add: EventHandler<()>) -> Element {
                 refresh += 1;
                 if text.contains("\"type\":\"plugin") || text.contains("\"type\":\"item\"") {
                     plugins_tick += 1;
+                }
+                if text.contains("\"type\":\"inbox\"") || text.contains("\"type\":\"item\"") {
+                    inbox_tick += 1;
+                }
+                if text.contains("\"type\":\"notify\"") {
+                    if let Ok(v) = serde_json::from_str::<Value>(&text) {
+                        net::notify(v["title"].as_str().unwrap_or("almighty"), v["body"].as_str().unwrap_or(""));
+                    }
                 }
             })
             .await;
@@ -360,6 +386,16 @@ fn Sidebar(on_add: EventHandler<()>) -> Element {
             button { class: "new", onclick: new_terminal, "+ New terminal" }
             if !online() {
                 p { class: "hint", "Server not reachable at {shell.server}" }
+            }
+            if inbox_counts() != Value::Null {
+                button {
+                    class: if matches!(view(), Some(View::Inbox)) { "row active" } else { "row" },
+                    onclick: move |_| view.set(Some(View::Inbox)),
+                    span { class: "title", "Inbox" }
+                    if inbox::pending(&inbox_counts()) > 0 {
+                        span { class: "badge", title: "Items that need a reply, an action or preparation", "{inbox::pending(&inbox_counts())}" }
+                    }
+                }
             }
             if !panels().is_empty() {
                 h2 { class: "section", "Panels" }

@@ -214,8 +214,8 @@ Summary; the contract is [`PLUGINS.md`](PLUGINS.md).
    tools with key encoding, human-priority lock, desktop client panel.
 3. **Plugin host** (done for light plugins, see docs/m3.md): WASM runtime, permissions, declarative panels, config
    files; first light plugin (GitHub connector).
-4. **Inbox + triage**: items, buckets, preferences, languages, corrections,
-   notifications on desktop; Gmail/IMAP and Slack connectors.
+4. **Inbox + triage** (done, see docs/m4.md; connectors untested against the real services): items, buckets, preferences, languages, corrections,
+   notifications on desktop; Gmail and Slack connectors (IMAP needs a socket capability).
 5. **Review + explainer + side browser + rich terminal mode**.
 6. **Service plugins**: manifest, embed panels, flows as the first one, then
    crew, trace, sketch, blueprint.
@@ -248,7 +248,8 @@ First plugin (needs `rustup target add wasm32-wasip2`):
 # then list repositories in <data dir>/workspace.toml, see plugins/github/README.md
 ```
 
-Notes: [`docs/m3.md`](docs/m3.md) (plugin host, GitHub connector),
+Notes: [`docs/m4.md`](docs/m4.md) (inbox, triage, Slack and Gmail connectors),
+[`docs/m3.md`](docs/m3.md) (plugin host, GitHub connector),
 [`docs/m2.md`](docs/m2.md) (terminal history, copy/paste, session tree),
 [`docs/m1.md`](docs/m1.md) (accounts, tokens, permissions),
 [`docs/spikes/m0.md`](docs/spikes/m0.md) (spike findings).

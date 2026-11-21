@@ -1,0 +1,25 @@
+id = "net.ema.gmail"
+name = "gmail"
+version = "0.1.0"
+kind = "wasm"
+license = "MIT"
+
+[wasm]
+component = "target/wasm32-wasip2/release/almighty_gmail_plugin.wasm"
+
+[permissions]
+items = ["write"]
+network = ["gmail.googleapis.com", "oauth2.googleapis.com"]
+secrets = ["GMAIL_CLIENT_ID", "GMAIL_CLIENT_SECRET", "GMAIL_REFRESH_TOKEN"]
+
+[connector]
+poll_seconds = 300
+
+[[panels]]
+id = "status"
+title = "Gmail"
+type = "declarative"
+
+[[commands]]
+id = "gmail.sync"
+title = "Sync Gmail now"

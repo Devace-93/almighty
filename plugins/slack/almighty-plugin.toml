@@ -1,0 +1,25 @@
+id = "net.ema.slack"
+name = "slack"
+version = "0.1.0"
+kind = "wasm"
+license = "MIT"
+
+[wasm]
+component = "target/wasm32-wasip2/release/almighty_slack_plugin.wasm"
+
+[permissions]
+items = ["write"]
+network = ["slack.com"]
+secrets = ["SLACK_TOKEN"]
+
+[connector]
+poll_seconds = 120
+
+[[panels]]
+id = "status"
+title = "Slack"
+type = "declarative"
+
+[[commands]]
+id = "slack.sync"
+title = "Sync Slack now"

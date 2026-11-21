@@ -53,6 +53,7 @@ dependencies = [
  "crossterm",
  "dirs",
  "futures-util",
+ "libc",
  "reqwest",
  "rpassword",
  "serde",

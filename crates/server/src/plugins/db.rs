@@ -48,6 +48,10 @@ CREATE TABLE IF NOT EXISTS items (
     links TEXT NOT NULL,           -- JSON array of URLs
     received_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
+    direct INTEGER NOT NULL DEFAULT 0,   -- addressed to one person (DM, review request)
+    mentions TEXT NOT NULL DEFAULT '[]', -- JSON array of names it calls out
+    due INTEGER,                         -- deadline or start time, Unix seconds
+    rev INTEGER NOT NULL DEFAULT 0,      -- goes up on every update
     UNIQUE (plugin, external_id)
 );
 CREATE INDEX IF NOT EXISTS items_recent ON items(updated_at DESC);
@@ -91,6 +95,13 @@ pub struct NewItem {
     /// Unix seconds; defaults to now for a new item.
     #[serde(default)]
     pub received_at: Option<u64>,
+    /// Hints for triage.
+    #[serde(default)]
+    pub direct: bool,
+    #[serde(default)]
+    pub mentions: Vec<String>,
+    #[serde(default)]
+    pub due: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -109,10 +120,17 @@ pub struct Item {
     pub links: Vec<String>,
     pub received_at: u64,
     pub updated_at: u64,
+    pub direct: bool,
+    pub mentions: Vec<String>,
+    pub due: Option<u64>,
+    /// Goes up every time a connector updates the item.
+    pub rev: u64,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ItemQuery {
+    #[serde(default)]
+    pub id: Option<String>,
     #[serde(default)]
     pub plugin: Option<String>,
     #[serde(default)]
@@ -266,6 +284,8 @@ impl Store {
         let now = now_secs() as i64;
         let actors = json!(item.actors.iter().take(50).collect::<Vec<_>>()).to_string();
         let links = json!(item.links.iter().take(50).collect::<Vec<_>>()).to_string();
+        let mentions = json!(item.mentions.iter().take(50).collect::<Vec<_>>()).to_string();
+        let due = item.due.map(|d| d as i64);
         let title = clip(item.title.trim(), 500);
         let body = clip(&item.body, 20_000);
         let conn = self.conn.lock().unwrap();
@@ -282,8 +302,8 @@ impl Store {
             Some(id) => {
                 conn.execute(
                     "UPDATE items SET source = ?2, kind = ?3, state = ?4, title = ?5, body = ?6, url = ?7, thread = ?8,
-                         actors = ?9, links = ?10, updated_at = ?11 WHERE id = ?1",
-                    params![id, source, kind, state, title, body, item.url, item.thread, actors, links, now],
+                         actors = ?9, links = ?10, updated_at = ?11, direct = ?12, mentions = ?13, due = ?14, rev = rev + 1 WHERE id = ?1",
+                    params![id, source, kind, state, title, body, item.url, item.thread, actors, links, now, item.direct as i64, mentions, due],
                 )
                 .map_err(|e| e.to_string())?;
                 Ok((id, false))
@@ -293,7 +313,8 @@ impl Store {
                 let id = format!("it_{}", bytes.iter().map(|b| format!("{b:02x}")).collect::<String>());
                 conn.execute(
                     "INSERT INTO items(id, plugin, external_id, source, kind, state, title, body, url, thread, actors, links,
-                         received_at, updated_at) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                         received_at, updated_at, direct, mentions, due)
+                     VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
                     params![
                         id,
                         plugin,
@@ -308,7 +329,10 @@ impl Store {
                         actors,
                         links,
                         item.received_at.map(|t| t as i64).unwrap_or(now),
-                        now
+                        now,
+                        item.direct as i64,
+                        mentions,
+                        due
                     ],
                 )
                 .map_err(|e| e.to_string())?;
@@ -320,13 +344,13 @@ impl Store {
     pub fn items(&self, q: &ItemQuery) -> Vec<Item> {
         let conn = self.conn.lock().unwrap();
         let sql = "SELECT id, plugin, external_id, source, kind, state, title, body, url, thread, actors, links,
-                          received_at, updated_at FROM items
+                          received_at, updated_at, direct, mentions, due, rev FROM items
                    WHERE (?1 IS NULL OR plugin = ?1) AND (?2 IS NULL OR source = ?2)
-                     AND (?3 IS NULL OR kind = ?3) AND (?4 IS NULL OR state = ?4)
+                     AND (?3 IS NULL OR kind = ?3) AND (?4 IS NULL OR state = ?4) AND (?6 IS NULL OR id = ?6)
                    ORDER BY updated_at DESC, id LIMIT ?5";
         let Ok(mut stmt) = conn.prepare(sql) else { return Vec::new() };
         let list = |text: String| serde_json::from_str::<Vec<String>>(&text).unwrap_or_default();
-        let rows = stmt.query_map(params![q.plugin, q.source, q.kind, q.state, q.limit.unwrap_or(100).min(500)], |r| {
+        let rows = stmt.query_map(params![q.plugin, q.source, q.kind, q.state, q.limit.unwrap_or(100).min(500), q.id], |r| {
             Ok(Item {
                 id: r.get(0)?,
                 plugin: r.get(1)?,
@@ -342,9 +366,17 @@ impl Store {
                 links: list(r.get(11)?),
                 received_at: r.get::<_, i64>(12)? as u64,
                 updated_at: r.get::<_, i64>(13)? as u64,
+                direct: r.get::<_, i64>(14)? != 0,
+                mentions: list(r.get(15)?),
+                due: r.get::<_, Option<i64>>(16)?.map(|d| d as u64),
+                rev: r.get::<_, i64>(17)? as u64,
             })
         });
         rows.map(|it| it.flatten().collect()).unwrap_or_default()
+    }
+
+    pub fn item(&self, id: &str) -> Option<Item> {
+        self.items(&ItemQuery { id: Some(id.to_string()), ..Default::default() }).into_iter().next()
     }
 }
 
@@ -389,8 +421,4 @@ mod tests {
         assert_eq!(open(&[7; 32], &raw), None);
         assert_eq!(open(&store.secret_key, "enc1:AAAA"), None);
     }
-}
-
-pub fn items_json(items: &[Item]) -> Value {
-    json!(items)
 }

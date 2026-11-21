@@ -104,6 +104,17 @@ enum Cmd {
         #[command(subcommand)]
         cmd: plugin::PluginCmd,
     },
+    /// Your triaged inbox: what needs a reply, an action, preparation, or nothing.
+    Inbox {
+        #[command(subcommand)]
+        cmd: Option<InboxCmd>,
+        /// Only one bucket: reply, act, prepare, fyi or noise.
+        #[arg(long)]
+        bucket: Option<String>,
+        /// open (default), done or all.
+        #[arg(long, default_value = "open")]
+        show: String,
+    },
     /// List items that connectors brought in.
     Items {
         #[arg(long)]
@@ -116,6 +127,24 @@ enum Cmd {
     Hook,
     /// MCP server over stdio exposing the terminal control tools.
     Mcp,
+}
+
+#[derive(Subcommand)]
+enum InboxCmd {
+    /// Move an item to another bucket (remembered for similar items).
+    Move { item: String, bucket: String },
+    /// Set the priority of an item, 0 to 3.
+    Priority { item: String, priority: u8 },
+    /// Mark an item as done (or open again with --undo).
+    Done {
+        item: String,
+        #[arg(long)]
+        undo: bool,
+    },
+    /// Hide an item for some hours.
+    Snooze { item: String, hours: u64 },
+    /// Show the triage preferences the server reads for you, and their file.
+    Preferences,
 }
 
 #[derive(Subcommand)]
@@ -256,6 +285,11 @@ fn is_claude(command: &[String]) -> bool {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // `almighty inbox | head` should end quietly, not with a broken-pipe panic.
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
     let cli = Cli::parse();
     let url = cli.url.trim_end_matches('/').to_string();
     let token = cli.token.or_else(|| creds::load(&url));
@@ -415,6 +449,43 @@ async fn main() -> Result<()> {
         }
         Cmd::Mcp => mcp::serve(client).await?,
         Cmd::Plugin { cmd } => plugin::run(&client, cmd).await?,
+        Cmd::Inbox { cmd: None, bucket, show } => {
+            let mut path = format!("/api/inbox?show={show}");
+            if let Some(b) = bucket {
+                path.push_str(&format!("&bucket={b}"));
+            }
+            let v = client.get(&path).await?;
+            for e in v["items"].as_array().into_iter().flatten() {
+                let (i, t) = (&e["item"], &e["triage"]);
+                println!(
+                    "{}\t{}\tp{}\t{}\t{}",
+                    i["id"].as_str().unwrap_or(""),
+                    t["bucket"].as_str().unwrap_or(""),
+                    t["priority"],
+                    i["source"].as_str().unwrap_or(""),
+                    i["title"].as_str().unwrap_or("")
+                );
+            }
+        }
+        Cmd::Inbox { cmd: Some(cmd), .. } => {
+            let (item, body) = match cmd {
+                InboxCmd::Move { item, bucket } => (item, json!({ "bucket": bucket })),
+                InboxCmd::Priority { item, priority } => (item, json!({ "priority": priority })),
+                InboxCmd::Done { item, undo } => (item, json!({ "done": !undo })),
+                InboxCmd::Snooze { item, hours } => {
+                    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
+                    (item, json!({ "snooze_until": now + hours * 3600 }))
+                }
+                InboxCmd::Preferences => {
+                    let v = client.get("/api/inbox/preferences").await?;
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                    return Ok(());
+                }
+            };
+            let v = client.post(&format!("/api/inbox/{item}"), body).await?;
+            let t = &v["triage"];
+            println!("{item}: {} p{}{}", t["bucket"].as_str().unwrap_or(""), t["priority"], if t["done"] == true { " (done)" } else { "" });
+        }
         Cmd::Items { source, limit } => {
             let mut path = format!("/api/items?limit={limit}");
             if let Some(s) = source {

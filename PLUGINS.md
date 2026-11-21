@@ -3,7 +3,7 @@
 **Status.** Light (WebAssembly) plugins are implemented: manifest,
 permissions, storage, secrets, outbound HTTP, items, connectors, declarative
 panels and commands. The interface is `wit/plugin.wit`; `plugins/example` is
-the smallest plugin and `plugins/github` a real connector. Still a draft, not
+the smallest plugin; `plugins/github`, `plugins/slack` and `plugins/gmail` are connectors. Still a draft, not
 built yet: service plugins, triage rules, item actions, agent tools, agent
 adapters, terminal access from plugins, events, `llm`, `notify`, web panels,
 and installing from a git URL or a registry. Sections below mark what exists.
@@ -98,6 +98,12 @@ A connector emits items; the inbox and triage of milestone 4 will read them.
 (defaults to the plugin id), `kind`, `state` (default `open`), `body`, `url`,
 `thread`, `actors`, `links`, `received_at` (Unix seconds) are optional.
 Emitting the same `external_id` again updates the item.
+
+Hints that triage reads: `direct` (addressed to one person: a direct message,
+a review request), `mentions` (names the item calls out; compared with the
+`me` list of each person's preferences) and `due` (a deadline or start time,
+Unix seconds). A `state` of `closed`, `merged`, `done`, `resolved`, `read`
+or `archived` marks the item as done in every inbox.
 
 ## Limits of a call (implemented)
 

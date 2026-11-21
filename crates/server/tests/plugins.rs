@@ -54,8 +54,8 @@ fn data_dir() -> PathBuf {
     dir
 }
 
-fn app_in(dir: &PathBuf) -> (Router, App) {
-    let config = Config { addr: ([127, 0, 0, 1], 0).into(), data_dir: dir.clone() };
+fn app_in(dir: &std::path::Path) -> (Router, App) {
+    let config = Config { addr: ([127, 0, 0, 1], 0).into(), data_dir: dir.to_path_buf() };
     build(config, Store::open(&dir.join("almighty.db")).unwrap())
 }
 
@@ -85,7 +85,7 @@ fn install_body() -> Value {
     })
 }
 
-async fn installed(dir: &PathBuf) -> (Router, App, String) {
+async fn installed(dir: &std::path::Path) -> (Router, App, String) {
     let (router, app) = app_in(dir);
     let admin = token(&app, "ana", Role::Admin);
     let (status, body) = call(&router, "POST", "/api/plugins", &admin, Some(install_body())).await;
@@ -101,9 +101,27 @@ fn http_server(handler: impl Fn(&str) -> (u16, String) + Send + 'static) -> u16 
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(mut stream) = stream else { break };
+            // Headers, then as many body bytes as Content-Length says: they may arrive apart.
+            let mut request = Vec::new();
             let mut buf = [0u8; 4096];
-            let n = stream.read(&mut buf).unwrap_or(0);
-            let (status, body) = handler(&String::from_utf8_lossy(&buf[..n]));
+            loop {
+                let n = stream.read(&mut buf).unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buf[..n]);
+                let text = String::from_utf8_lossy(&request).to_string();
+                if let Some(head_end) = text.find("\r\n\r\n") {
+                    let length = text[..head_end]
+                        .lines()
+                        .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap_or(0)))
+                        .unwrap_or(0);
+                    if request.len() >= head_end + 4 + length {
+                        break;
+                    }
+                }
+            }
+            let (status, body) = handler(&String::from_utf8_lossy(&request));
             let head = format!("HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
             let _ = stream.write_all(format!("{head}{body}").as_bytes());
         }
@@ -370,5 +388,207 @@ async fn github_connector() {
     let (_, info) = call(&router, "GET", &format!("/api/plugins/{GH}"), &admin, None).await;
     assert!(info["last_error"].as_str().unwrap().contains("404"));
     assert_eq!(call(&router, "GET", "/api/items?source=github", &admin, None).await.1.as_array().unwrap().len(), 3);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Installs `plugins/<name>` with its network permission pointed at this machine.
+async fn install_local(router: &Router, admin: &str, name: &str, hosts: &[&str]) {
+    let mut manifest = std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("../../plugins/{name}/almighty-plugin.toml"))).unwrap();
+    for host in hosts {
+        manifest = manifest.replace(&format!("\"{host}\""), "\"127.0.0.1\"");
+    }
+    let mut table = toml::from_str::<toml::Table>(&manifest).unwrap();
+    // Two hosts collapsed into one: keep the list free of duplicates.
+    if let Some(network) = table["permissions"].get_mut("network").and_then(|n| n.as_array_mut()) {
+        network.dedup();
+    }
+    let manifest = toml::to_string(&table).unwrap();
+    let body = json!({
+        "manifest": manifest,
+        "component": base64::engine::general_purpose::STANDARD.encode(build_plugin(name)),
+        "granted": table["permissions"],
+    });
+    let (status, out) = call(router, "POST", "/api/plugins", admin, Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{out}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn slack_connector() {
+    use std::sync::{Arc, Mutex};
+    const ID: &str = "net.ema.slack";
+    let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+    let seen2 = seen.clone();
+    let port = http_server(move |request| {
+        let path = request.split_whitespace().nth(1).unwrap_or("").to_string();
+        seen2.lock().unwrap().push(path.clone());
+        if !request.to_ascii_lowercase().contains("authorization: bearer xoxp-test") {
+            return (200, json!({ "ok": false, "error": "invalid_auth" }).to_string());
+        }
+        let body = if path.starts_with("/auth.test") {
+            json!({ "ok": true, "user_id": "U1", "user": "ana", "url": "https://acme.slack.com/" })
+        } else if path.starts_with("/users.conversations") {
+            json!({ "ok": true, "channels": [{ "id": "C1", "name": "general" }, { "id": "D1", "is_im": true }] })
+        } else if path.starts_with("/conversations.history") && path.contains("channel=C1") {
+            // The second sync asks only for what is newer than the last message seen.
+            if path.contains("oldest=1800000002.000200") {
+                json!({ "ok": true, "messages": [] })
+            } else {
+                json!({ "ok": true, "messages": [
+                    { "ts": "1800000002.000200", "user": "U2", "text": "<@U1> can you check the build?\nIt is red." },
+                    { "ts": "1800000001.000100", "user": "U1", "text": "my own message" },
+                    { "ts": "1800000000.000000", "user": "U2", "subtype": "channel_join", "text": "joined" },
+                ] })
+            }
+        } else if path.starts_with("/conversations.history") {
+            json!({ "ok": true, "messages": [{ "ts": "1800000003.000300", "user": "U2", "text": "lunch?" }] })
+        } else if path.starts_with("/users.info") {
+            json!({ "ok": true, "user": { "name": "bo", "profile": { "display_name": "Bo" } } })
+        } else {
+            json!({ "ok": false, "error": "unknown_method" })
+        };
+        (200, body.to_string())
+    });
+
+    let dir = data_dir();
+    let (router, app) = app_in(&dir);
+    let admin = token(&app, "ana", Role::Admin);
+    install_local(&router, &admin, "slack", &["slack.com"]).await;
+    std::fs::write(dir.join("workspace.toml"), format!("[plugins.\"{ID}\"]\napi = \"http://127.0.0.1:{port}\"\n")).unwrap();
+    let poll = format!("/api/plugins/{ID}/poll");
+
+    // No token: the scheduled poll does nothing and does not fail.
+    assert_eq!(call(&router, "POST", &poll, &admin, None).await.0, StatusCode::OK);
+    assert!(seen.lock().unwrap().is_empty());
+
+    let secret = format!("/api/plugins/{ID}/secrets/SLACK_TOKEN");
+    call(&router, "POST", &secret, &admin, Some(json!({ "value": "xoxp-test" }))).await;
+    let (status, out) = call(&router, "POST", &poll, &admin, None).await;
+    assert_eq!(status, StatusCode::OK, "{out}");
+    let (_, items) = call(&router, "GET", "/api/items?source=slack", &admin, None).await;
+    let items = items.as_array().unwrap().clone();
+    assert_eq!(items.len(), 2, "own messages and joins are skipped: {items:?}");
+    let find = |id: &str| items.iter().find(|i| i["external_id"] == id).cloned().unwrap();
+    let mention = find("C1:1800000002.000200");
+    assert_eq!(mention["title"], "<@U1> can you check the build?");
+    assert_eq!(mention["thread"], "#general");
+    assert_eq!(mention["actors"], json!(["Bo"]));
+    assert_eq!(mention["mentions"], json!(["ana", "U1"]));
+    assert_eq!(mention["direct"], false);
+    assert_eq!(mention["url"], "https://acme.slack.com/archives/C1/p1800000002000200");
+    assert_eq!(mention["received_at"], 1800000002);
+    let dm = find("D1:1800000003.000300");
+    assert_eq!((dm["direct"].as_bool(), dm["thread"].as_str()), (Some(true), Some("direct message")));
+
+    // Triage picks the hints up: both are for ana to answer.
+    std::fs::create_dir_all(dir.join("users/ana")).unwrap();
+    std::fs::write(dir.join("users/ana/triage.toml"), "me = [\"ana\"]\n").unwrap();
+    let (_, inbox) = call(&router, "GET", "/api/inbox?bucket=reply", &admin, None).await;
+    assert_eq!(inbox["items"].as_array().unwrap().len(), 2, "{inbox}");
+
+    // The next sync continues after the last message and looks names up only once.
+    call(&router, "POST", &poll, &admin, None).await;
+    {
+        let seen = seen.lock().unwrap();
+        assert!(seen.iter().any(|p| p.contains("channel=C1") && p.contains("oldest=1800000002.000200")), "{seen:?}");
+        assert_eq!(seen.iter().filter(|p| p.starts_with("/users.info")).count(), 1);
+    }
+
+    // A refused token is reported in the panel.
+    call(&router, "POST", &secret, &admin, Some(json!({ "value": "xoxp-wrong" }))).await;
+    let (_, tree) = call(&router, "POST", &format!("/api/plugins/{ID}/panels/status/action"), &admin, Some(json!({ "action": "sync" }))).await;
+    assert!(tree.to_string().contains("invalid_auth"), "{tree}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn gmail_connector() {
+    use std::sync::{Arc, Mutex};
+    const ID: &str = "net.ema.gmail";
+    let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+    let seen2 = seen.clone();
+    let message = |id: &str, subject: &str, from: &str, labels: Value, list: bool| {
+        let mut headers = vec![json!({ "name": "From", "value": from }), json!({ "name": "Subject", "value": subject })];
+        if list {
+            headers.push(json!({ "name": "List-Unsubscribe", "value": "<mailto:x@example.com>" }));
+        }
+        json!({ "id": id, "threadId": format!("t{id}"), "labelIds": labels, "snippet": "Short preview", "internalDate": "1800000000000",
+                "payload": { "headers": headers } })
+    };
+    let port = http_server(move |request| {
+        seen2.lock().unwrap().push(request.to_string());
+        let path = request.split_whitespace().nth(1).unwrap_or("");
+        if path.starts_with("/token") {
+            return if request.contains("refresh_token=r%2Ftoken") && request.contains("client_secret=s3") {
+                (200, json!({ "access_token": "ya29.test", "expires_in": 3599 }).to_string())
+            } else {
+                (400, json!({ "error": "invalid_grant", "error_description": "Bad Request" }).to_string())
+            };
+        }
+        if !request.to_ascii_lowercase().contains("authorization: bearer ya29.test") {
+            return (401, json!({ "error": { "message": "Invalid Credentials" } }).to_string());
+        }
+        if path.starts_with("/gmail/v1/users/me/messages?") {
+            (200, json!({ "messages": [{ "id": "a1" }, { "id": "b2" }, { "id": "c3" }, { "id": "../x" }] }).to_string())
+        } else if path.starts_with("/gmail/v1/users/me/messages/a1") {
+            (200, message("a1", "Contract draft", "\"Cy Lee\" <cy@example.com>", json!(["INBOX", "UNREAD"]), false).to_string())
+        } else if path.starts_with("/gmail/v1/users/me/messages/b2") {
+            (200, message("b2", "Big sale", "shop@example.com", json!(["INBOX", "UNREAD", "CATEGORY_PROMOTIONS"]), true).to_string())
+        } else if path.starts_with("/gmail/v1/users/me/messages/c3") {
+            (200, message("c3", "", "dee@example.com", json!(["INBOX"]), false).to_string())
+        } else {
+            (404, json!({ "error": { "message": "Not Found" } }).to_string())
+        }
+    });
+
+    let dir = data_dir();
+    let (router, app) = app_in(&dir);
+    let admin = token(&app, "ana", Role::Admin);
+    install_local(&router, &admin, "gmail", &["gmail.googleapis.com", "oauth2.googleapis.com"]).await;
+    let base = format!("http://127.0.0.1:{port}");
+    std::fs::write(dir.join("workspace.toml"), format!("[plugins.\"{ID}\"]\napi = \"{base}\"\ntoken_url = \"{base}/token\"\n")).unwrap();
+    let poll = format!("/api/plugins/{ID}/poll");
+    let secret = |name: &str| format!("/api/plugins/{ID}/secrets/{name}");
+
+    // Incomplete credentials: nothing is contacted, the panel names what is missing.
+    call(&router, "POST", &secret("GMAIL_CLIENT_ID"), &admin, Some(json!({ "value": "id1" }))).await;
+    assert_eq!(call(&router, "POST", &poll, &admin, None).await.0, StatusCode::OK);
+    assert!(seen.lock().unwrap().is_empty());
+    let (_, tree) = call(&router, "GET", &format!("/api/plugins/{ID}/panels/status"), &admin, None).await;
+    assert!(tree.to_string().contains("GMAIL_CLIENT_SECRET is not set"), "{tree}");
+
+    call(&router, "POST", &secret("GMAIL_CLIENT_SECRET"), &admin, Some(json!({ "value": "s3" }))).await;
+    call(&router, "POST", &secret("GMAIL_REFRESH_TOKEN"), &admin, Some(json!({ "value": "r/token" }))).await;
+    let (status, out) = call(&router, "POST", &poll, &admin, None).await;
+    assert_eq!(status, StatusCode::OK, "{out}");
+    let (_, items) = call(&router, "GET", "/api/items?source=gmail", &admin, None).await;
+    let items = items.as_array().unwrap().clone();
+    assert_eq!(items.len(), 3, "an id that is not plain is never requested: {items:?}");
+    let find = |id: &str| items.iter().find(|i| i["external_id"] == id).cloned().unwrap();
+    let personal = find("a1");
+    assert_eq!((personal["title"].as_str(), personal["actors"][0].as_str()), (Some("Contract draft"), Some("Cy Lee")));
+    assert_eq!((personal["direct"].as_bool(), personal["state"].as_str()), (Some(true), Some("open")));
+    assert_eq!(personal["body"], "Short preview");
+    assert_eq!(personal["received_at"], 1800000000);
+    assert_eq!(find("b2")["direct"], false, "promotions and lists are not addressed to you");
+    assert_eq!((find("c3")["title"].as_str(), find("c3")["state"].as_str()), (Some("(no subject)"), Some("read")));
+
+    // In the inbox: the personal mail asks for a reply, the sale does not, the read one is done.
+    let (_, inbox) = call(&router, "GET", "/api/inbox?show=all", &admin, None).await;
+    let triage = |id: &str| {
+        inbox["items"].as_array().unwrap().iter().find(|e| e["item"]["external_id"] == id).map(|e| e["triage"].clone()).unwrap()
+    };
+    assert_eq!(triage("a1")["bucket"], "reply");
+    assert_eq!(triage("b2")["bucket"], "fyi");
+    assert_eq!(triage("c3")["done"], true);
+
+    // The access token is not kept anywhere: every sync asks for a new one.
+    call(&router, "POST", &poll, &admin, None).await;
+    assert_eq!(seen.lock().unwrap().iter().filter(|r| r.starts_with("POST /token")).count(), 2);
+
+    // A revoked refresh token is reported with Google's reason.
+    call(&router, "POST", &secret("GMAIL_REFRESH_TOKEN"), &admin, Some(json!({ "value": "revoked" }))).await;
+    let (status, out) = call(&router, "POST", &poll, &admin, None).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert!(out["error"].as_str().unwrap().contains("refused the refresh token"), "{out}");
     let _ = std::fs::remove_dir_all(dir);
 }

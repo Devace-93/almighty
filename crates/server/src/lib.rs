@@ -5,6 +5,7 @@ pub mod keys;
 pub mod plugins;
 pub mod session;
 pub mod store;
+pub mod triage;
 
 pub use api::{build, serve, App, AppState, Config};
 

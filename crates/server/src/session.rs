@@ -169,7 +169,7 @@ impl Session {
         let cwd = req
             .cwd
             .clone()
-            .or_else(|| crate::home_dir())
+            .or_else(crate::home_dir)
             .unwrap_or_else(|| ".".into());
         cmd.cwd(&cwd);
         cmd.env("TERM", "xterm-256color");

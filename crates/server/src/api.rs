@@ -69,6 +69,7 @@ pub struct AppState {
     pub config: Config,
     pub store: Arc<Store>,
     pub plugins: Arc<Plugins>,
+    pub triage: crate::triage::Triage,
     /// Needed to create the first owner over the API; printed at start-up.
     pub setup_code: String,
     sessions: RwLock<HashMap<String, Arc<Session>>>,
@@ -172,10 +173,12 @@ pub fn build(config: Config, store: Store) -> (Router, App) {
     let code: [u8; 5] = rand::random();
     let store = Arc::new(store);
     let plugins = Plugins::new(&config.data_dir, store.clone(), events.clone()).expect("plugin host");
+    let triage = crate::triage::Triage { store: store.clone(), data_dir: config.data_dir.clone(), events: events.clone() };
     let app: App = Arc::new(AppState {
         config,
         store,
         plugins,
+        triage,
         setup_code: code.iter().map(|b| format!("{b:02x}")).collect(),
         sessions: RwLock::new(HashMap::new()),
         next_id: AtomicU64::new(1),
@@ -222,6 +225,10 @@ pub fn build(config: Config, store: Store) -> (Router, App) {
         .route("/api/plugins/{id}/commands/{command}", post(run_command))
         .route("/api/items", get(list_items))
         .route("/api/layout", get(layout))
+        .route("/api/inbox", get(inbox))
+        .route("/api/inbox/counts", get(inbox_counts))
+        .route("/api/inbox/preferences", get(inbox_preferences))
+        .route("/api/inbox/{id}", post(inbox_change))
         .layer(middleware::from_fn_with_state(app.clone(), auth))
         .layer(tower_http::cors::CorsLayer::permissive())
         .with_state(app.clone());
@@ -239,6 +246,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     })?;
     let (router, app) = build(config, store);
     crate::plugins::spawn_scheduler(app.plugins.clone());
+    crate::triage::spawn_worker(app.triage.clone());
     eprintln!("almightyd listening on {} (data: {})", app.config.url(), app.config.data_dir.display());
     if app.store.user_count() == 0 {
         eprintln!("No users yet. Create the owner with `almighty user add <name> --role owner`,");
@@ -444,13 +452,27 @@ async fn audit(State(app): State<App>, Extension(who): Who, Query(q): Query<Hash
 }
 
 /// Push channel: tells clients when the session list or an agent tree changed.
-async fn events_ws(State(app): State<App>, Extension(_who): Who, ws: WebSocketUpgrade) -> Response {
+/// Events addressed to one person (`"user": name`) reach only that person.
+fn event_is_for(text: &str, who: &Principal) -> bool {
+    if !text.contains("\"user\"") {
+        return true;
+    }
+    let to = serde_json::from_str::<Value>(text).ok().and_then(|v| v["user"].as_str().map(str::to_string));
+    match (to, who) {
+        (None, _) => true,
+        (Some(to), Principal::User { name, .. }) => to.eq_ignore_ascii_case(name),
+        (Some(_), Principal::Agent { .. }) => false,
+    }
+}
+
+async fn events_ws(State(app): State<App>, Extension(who): Who, ws: WebSocketUpgrade) -> Response {
     let mut rx = app.events.subscribe();
     ws.on_upgrade(move |socket| async move {
         let (mut tx, mut incoming) = socket.split();
         loop {
             tokio::select! {
                 event = rx.recv() => match event {
+                    Ok(text) if !event_is_for(&text, &who) => {}
                     Ok(text) => {
                         if tx.send(Message::Text(text.into())).await.is_err() { break; }
                     }
@@ -1161,6 +1183,43 @@ async fn layout(State(app): State<App>, Extension(who): Who) -> ApiResult {
         Err(_) => toml::Table::new(),
     };
     Ok(Json(json!(value)))
+}
+
+// ---- inbox ----
+
+async fn inbox(State(app): State<App>, Extension(who): Who, Query(q): Query<crate::triage::InboxQuery>) -> ApiResult {
+    let (id, name) = need_role(&who, Role::Member)?;
+    Ok(Json(json!({ "items": app.triage.inbox(id, name, &q), "counts": app.triage.counts(id, name) })))
+}
+
+async fn inbox_counts(State(app): State<App>, Extension(who): Who) -> ApiResult {
+    let (id, name) = need_role(&who, Role::Member)?;
+    Ok(Json(app.triage.counts(id, name)))
+}
+
+/// The caller's triage preferences as the server reads them, and where the file is.
+async fn inbox_preferences(State(app): State<App>, Extension(who): Who) -> ApiResult {
+    let (_, name) = need_role(&who, Role::Member)?;
+    let prefs = crate::triage::Prefs::load(&app.config.data_dir, name).map_err(bad)?;
+    let path = crate::triage::Prefs::path(&app.config.data_dir, name);
+    Ok(Json(json!({ "preferences": prefs, "file": path.to_string_lossy() })))
+}
+
+async fn inbox_change(
+    State(app): State<App>,
+    Extension(who): Who,
+    Path(item): Path<String>,
+    Json(change): Json<crate::triage::Change>,
+) -> ApiResult {
+    let (id, name) = need_role(&who, Role::Member)?;
+    let row = app.triage.change(id, name, &item, &change).map_err(|e| {
+        if e.starts_with("no item") {
+            ApiError(StatusCode::NOT_FOUND, e)
+        } else {
+            bad(e)
+        }
+    })?;
+    Ok(Json(json!({ "triage": row })))
 }
 
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {

@@ -201,3 +201,29 @@ pub async fn read_clipboard() -> Option<String> {
     });
     rx.await.ok().flatten().filter(|t| !t.is_empty())
 }
+
+/// Shows a system notification. Best effort: a platform or a person may
+/// refuse it, and that is not an error.
+pub fn notify(title: &str, body: &str) {
+    #[cfg(all(not(target_arch = "wasm32"), any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        let (title, body) = (title.to_string(), body.to_string());
+        // Off the UI thread: the notification service may take its time.
+        std::thread::spawn(move || {
+            let _ = notify_rust::Notification::new().appname("almighty").summary(&title).body(&body).show();
+        });
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        // The page asks for permission the first time; text is passed as data, never as script.
+        let args = serde_json::json!([title, body]).to_string();
+        let script = format!(
+            "const [t, b] = {args}; if ('Notification' in window) {{              if (Notification.permission === 'granted') {{ new Notification(t, {{ body: b }}); }}              else if (Notification.permission !== 'denied') {{ Notification.requestPermission().then(p => {{ if (p === 'granted') new Notification(t, {{ body: b }}); }}); }} }}"
+        );
+        let _ = dioxus::document::eval(&script);
+    }
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        let _ = (title, body);
+    }
+}

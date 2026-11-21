@@ -84,6 +84,8 @@ fn item(repo: &str, pr: &Value, kind: &str) -> Option<Value> {
         "thread": repo,
         "actors": [pr["user"]["login"].as_str().unwrap_or("")],
         "received_at": pr["created_at"].as_str().and_then(unix_time),
+        // A review request is addressed to the person whose token this is.
+        "direct": kind == "review_request",
     }))
 }
 

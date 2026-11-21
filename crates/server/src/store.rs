@@ -181,6 +181,11 @@ impl Store {
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
         conn.execute_batch(SCHEMA)?;
         conn.execute_batch(crate::plugins::db::SCHEMA)?;
+        // Columns added after the first plugin release; an error means they exist.
+        for column in ["direct INTEGER NOT NULL DEFAULT 0", "mentions TEXT NOT NULL DEFAULT '[]'", "due INTEGER", "rev INTEGER NOT NULL DEFAULT 0"] {
+            let _ = conn.execute(&format!("ALTER TABLE items ADD COLUMN {column}"), []);
+        }
+        conn.execute_batch(crate::triage::SCHEMA)?;
         // Terminal sessions do not survive a restart, so neither do their tokens.
         conn.execute("DELETE FROM tokens WHERE kind = 'agent'", [])?;
         Ok(Store { conn: Mutex::new(conn), secret_key })

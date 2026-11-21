@@ -22,3 +22,6 @@ crossterm = "0.29"
 rpassword = "7"
 dirs = "6"
 base64 = "0.22"
+
+[target."cfg(unix)".dependencies]
+libc = "0.2"
