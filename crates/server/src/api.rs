@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use axum::body::Bytes;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Extension, Path, Query, Request, State};
+use axum::extract::{DefaultBodyLimit, Extension, Path, Query, Request, State};
 use axum::http::{header, Method, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -27,6 +27,9 @@ use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::RecvError;
 
 use crate::keys::{encode_key, encode_text};
+use crate::plugins::db::ItemQuery;
+use crate::plugins::manifest::Permissions;
+use crate::plugins::{Call, Plugins, MAX_COMPONENT_BYTES};
 use crate::session::{Actor, CreateSession, Creator, InputError, Scope, Session, SpawnContext};
 use crate::store::{Principal, Role, Store};
 
@@ -64,7 +67,8 @@ impl Config {
 
 pub struct AppState {
     pub config: Config,
-    pub store: Store,
+    pub store: Arc<Store>,
+    pub plugins: Arc<Plugins>,
     /// Needed to create the first owner over the API; printed at start-up.
     pub setup_code: String,
     sessions: RwLock<HashMap<String, Arc<Session>>>,
@@ -166,9 +170,12 @@ fn actor_of(who: &Principal) -> Actor {
 pub fn build(config: Config, store: Store) -> (Router, App) {
     let (events, _) = broadcast::channel(256);
     let code: [u8; 5] = rand::random();
+    let store = Arc::new(store);
+    let plugins = Plugins::new(&config.data_dir, store.clone(), events.clone()).expect("plugin host");
     let app: App = Arc::new(AppState {
         config,
         store,
+        plugins,
         setup_code: code.iter().map(|b| format!("{b:02x}")).collect(),
         sessions: RwLock::new(HashMap::new()),
         next_id: AtomicU64::new(1),
@@ -204,6 +211,17 @@ pub fn build(config: Config, store: Store) -> (Router, App) {
         .route("/api/sessions/{id}/grid", get(grid_ws))
         .route("/api/hooks/claude", post(claude_hook))
         .route("/api/probe", get(probe))
+        .route("/api/plugins", get(list_plugins).post(install_plugin).layer(DefaultBodyLimit::max(MAX_COMPONENT_BYTES * 2)))
+        .route("/api/plugins/{id}", get(get_plugin).delete(remove_plugin))
+        .route("/api/plugins/{id}/enabled", post(enable_plugin))
+        .route("/api/plugins/{id}/secrets/{name}", post(set_secret).delete(delete_secret))
+        .route("/api/plugins/{id}/logs", get(plugin_logs))
+        .route("/api/plugins/{id}/poll", post(poll_plugin))
+        .route("/api/plugins/{id}/panels/{panel}", get(render_panel))
+        .route("/api/plugins/{id}/panels/{panel}/action", post(panel_action))
+        .route("/api/plugins/{id}/commands/{command}", post(run_command))
+        .route("/api/items", get(list_items))
+        .route("/api/layout", get(layout))
         .layer(middleware::from_fn_with_state(app.clone(), auth))
         .layer(tower_http::cors::CorsLayer::permissive())
         .with_state(app.clone());
@@ -220,6 +238,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         )
     })?;
     let (router, app) = build(config, store);
+    crate::plugins::spawn_scheduler(app.plugins.clone());
     eprintln!("almightyd listening on {} (data: {})", app.config.url(), app.config.data_dir.display());
     if app.store.user_count() == 0 {
         eprintln!("No users yet. Create the owner with `almighty user add <name> --role owner`,");
@@ -966,6 +985,182 @@ fn scroll_request(text: &str, current: usize) -> Option<usize> {
     }
     let delta = v.get("delta").and_then(Value::as_i64).unwrap_or(0);
     Some((current as i64 + delta).max(0) as usize)
+}
+
+// ---- plugins ----
+
+#[derive(Deserialize)]
+struct InstallReq {
+    manifest: String,
+    /// The component, base64.
+    component: String,
+    /// The permissions the admin saw and approved.
+    granted: Permissions,
+}
+
+fn plugin_json(app: &App, plugin: &crate::plugins::Loaded) -> Value {
+    plugin.describe(&app.store.secret_names(&plugin.manifest.id))
+}
+
+fn need_plugin(app: &App, id: &str) -> Result<Arc<crate::plugins::Loaded>, ApiError> {
+    app.plugins.get(id).ok_or_else(|| ApiError(StatusCode::NOT_FOUND, format!("no plugin {id}")))
+}
+
+/// Runs a plugin call off the async threads. A failure inside the plugin is
+/// the plugin's answer (502), not a server error.
+async fn plugin_call(app: &App, id: String, call: Call) -> Result<Value, ApiError> {
+    need_plugin(app, &id)?;
+    let plugins = app.plugins.clone();
+    tokio::task::spawn_blocking(move || plugins.call(&id, call))
+        .await
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e))
+}
+
+async fn list_plugins(State(app): State<App>, Extension(who): Who) -> ApiResult {
+    need_role(&who, Role::Guest)?;
+    let list: Vec<Value> = app.plugins.list().iter().map(|p| plugin_json(&app, p)).collect();
+    Ok(Json(json!(list)))
+}
+
+async fn get_plugin(State(app): State<App>, Extension(who): Who, Path(id): Path<String>) -> ApiResult {
+    need_role(&who, Role::Guest)?;
+    Ok(Json(plugin_json(&app, &*need_plugin(&app, &id)?)))
+}
+
+async fn install_plugin(State(app): State<App>, Extension(who): Who, Json(req): Json<InstallReq>) -> ApiResult {
+    let (_, name) = need_role(&who, Role::Admin)?;
+    use base64::Engine;
+    let component = base64::engine::general_purpose::STANDARD
+        .decode(req.component.as_bytes())
+        .map_err(|_| bad("component must be base64"))?;
+    let by = name.to_string();
+    let plugins = app.plugins.clone();
+    // Compiling the component takes a moment.
+    let loaded = tokio::task::spawn_blocking(move || plugins.install(&req.manifest, &component, &req.granted, &by))
+        .await
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(bad)?;
+    let detail = format!("{} {} {}", loaded.manifest.id, loaded.manifest.version, json!(loaded.manifest.permissions));
+    app.store.audit(&who.label(), None, "plugin.install", &detail);
+    Ok(Json(plugin_json(&app, &loaded)))
+}
+
+async fn remove_plugin(State(app): State<App>, Extension(who): Who, Path(id): Path<String>) -> ApiResult {
+    need_role(&who, Role::Admin)?;
+    if !app.plugins.remove(&id) {
+        return Err(ApiError(StatusCode::NOT_FOUND, format!("no plugin {id}")));
+    }
+    app.store.audit(&who.label(), None, "plugin.remove", &id);
+    Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+struct EnabledReq {
+    enabled: bool,
+}
+
+async fn enable_plugin(State(app): State<App>, Extension(who): Who, Path(id): Path<String>, Json(req): Json<EnabledReq>) -> ApiResult {
+    need_role(&who, Role::Admin)?;
+    if !app.plugins.set_enabled(&id, req.enabled) {
+        return Err(ApiError(StatusCode::NOT_FOUND, format!("no plugin {id}")));
+    }
+    app.store.audit(&who.label(), None, if req.enabled { "plugin.enable" } else { "plugin.disable" }, &id);
+    Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+struct SecretReq {
+    value: String,
+}
+
+async fn set_secret(
+    State(app): State<App>,
+    Extension(who): Who,
+    Path((id, name)): Path<(String, String)>,
+    Json(req): Json<SecretReq>,
+) -> ApiResult {
+    need_role(&who, Role::Admin)?;
+    let plugin = need_plugin(&app, &id)?;
+    if !plugin.manifest.permissions.secrets.contains(&name) {
+        return Err(bad(format!("the plugin does not declare a secret named {name}")));
+    }
+    if req.value.is_empty() || req.value.len() > 8192 {
+        return Err(bad("value must have 1 to 8192 bytes"));
+    }
+    app.store.secret_set(&id, &name, &req.value).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    // The value is never written to the audit log.
+    app.store.audit(&who.label(), None, "plugin.secret.set", &format!("{id} {name}"));
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn delete_secret(State(app): State<App>, Extension(who): Who, Path((id, name)): Path<(String, String)>) -> ApiResult {
+    need_role(&who, Role::Admin)?;
+    need_plugin(&app, &id)?;
+    let removed = app.store.secret_delete(&id, &name);
+    app.store.audit(&who.label(), None, "plugin.secret.delete", &format!("{id} {name}"));
+    Ok(Json(json!({ "ok": removed })))
+}
+
+async fn plugin_logs(State(app): State<App>, Extension(who): Who, Path(id): Path<String>) -> ApiResult {
+    need_role(&who, Role::Admin)?;
+    Ok(Json(json!(need_plugin(&app, &id)?.logs())))
+}
+
+async fn poll_plugin(State(app): State<App>, Extension(who): Who, Path(id): Path<String>) -> ApiResult {
+    need_role(&who, Role::Member)?;
+    plugin_call(&app, id, Call::Poll).await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn render_panel(State(app): State<App>, Extension(who): Who, Path((id, panel)): Path<(String, String)>) -> ApiResult {
+    need_role(&who, Role::Guest)?;
+    Ok(Json(json!({ "tree": plugin_call(&app, id, Call::Render { panel }).await? })))
+}
+
+#[derive(Deserialize)]
+struct ActionReq {
+    action: String,
+    #[serde(default)]
+    payload: Value,
+}
+
+async fn panel_action(
+    State(app): State<App>,
+    Extension(who): Who,
+    Path((id, panel)): Path<(String, String)>,
+    Json(req): Json<ActionReq>,
+) -> ApiResult {
+    need_role(&who, Role::Member)?;
+    let call = Call::Action { panel, action: req.action, payload: req.payload };
+    Ok(Json(json!({ "tree": plugin_call(&app, id, call).await? })))
+}
+
+async fn run_command(
+    State(app): State<App>,
+    Extension(who): Who,
+    Path((id, command)): Path<(String, String)>,
+    body: Option<Json<Value>>,
+) -> ApiResult {
+    need_role(&who, Role::Member)?;
+    let args = body.map(|Json(v)| v).unwrap_or(Value::Null);
+    Ok(Json(json!({ "result": plugin_call(&app, id, Call::Command { id: command, args }).await? })))
+}
+
+async fn list_items(State(app): State<App>, Extension(who): Who, Query(q): Query<ItemQuery>) -> ApiResult {
+    need_role(&who, Role::Guest)?;
+    Ok(Json(json!(app.store.items(&q))))
+}
+
+/// The caller's `layout.toml` as JSON; an empty object when there is none.
+async fn layout(State(app): State<App>, Extension(who): Who) -> ApiResult {
+    let (_, name) = need_role(&who, Role::Guest)?;
+    let path = app.config.data_dir.join("users").join(name.to_ascii_lowercase()).join("layout.toml");
+    let value = match std::fs::read_to_string(&path) {
+        Ok(text) => toml::from_str::<toml::Table>(&text).map_err(|e| bad(format!("layout.toml: {e}")))?,
+        Err(_) => toml::Table::new(),
+    };
+    Ok(Json(json!(value)))
 }
 
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {

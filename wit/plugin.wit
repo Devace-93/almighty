@@ -1,0 +1,63 @@
+// Contract between almighty and a light (WebAssembly) plugin.
+//
+// Structured values cross the boundary as JSON text: items, panel trees,
+// configuration and action payloads. Their shapes are in PLUGINS.md.
+package almighty:plugin@0.1.0;
+
+interface host {
+    /// `level` is one of debug, info, warn, error.
+    log: func(level: string, message: string);
+
+    /// The plugin's table from `workspace.toml`, as a JSON object.
+    config: func() -> string;
+
+    /// A secret the manifest declared and an admin provided.
+    secret: func(name: string) -> option<string>;
+
+    /// Storage private to the plugin.
+    kv-get: func(key: string) -> option<string>;
+    kv-set: func(key: string, value: string) -> result<_, string>;
+    kv-delete: func(key: string);
+
+    record http-request {
+        method: string,
+        url: string,
+        headers: list<tuple<string, string>>,
+        body: option<list<u8>>,
+    }
+
+    record http-response {
+        status: u16,
+        headers: list<tuple<string, string>>,
+        body: list<u8>,
+    }
+
+    /// Outbound request. Only hosts listed under `permissions.network` are
+    /// reachable; redirects are returned, not followed.
+    http-fetch: func(request: http-request) -> result<http-response, string>;
+
+    /// Creates or updates an item (matched by `external_id`). Returns
+    /// `{"id": "...", "created": true|false}`. Needs `items = ["write"]`.
+    emit-item: func(item: string) -> result<string, string>;
+
+    /// Items of the workspace as a JSON array. Query: `{"source", "kind",
+    /// "state", "limit"}`, all optional. Needs `items = ["read"]`; without it
+    /// a plugin only sees the items it emitted.
+    query-items: func(query: string) -> result<string, string>;
+}
+
+world plugin {
+    import host;
+
+    /// Connector tick, called every `connector.poll_seconds` and on demand.
+    export poll: func() -> result<_, string>;
+
+    /// Returns the tree of a panel.
+    export render: func(panel: string) -> result<string, string>;
+
+    /// A person used a node that carries an action. Returns the new tree.
+    export action: func(panel: string, action: string, payload: string) -> result<string, string>;
+
+    /// Runs a command from the manifest. Returns a JSON value.
+    export command: func(id: string, args: string) -> result<string, string>;
+}

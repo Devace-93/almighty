@@ -3,6 +3,7 @@
 mod attach;
 mod creds;
 mod mcp;
+mod plugin;
 
 use std::collections::HashMap;
 use std::io::Read;
@@ -98,6 +99,18 @@ enum Cmd {
     },
     /// Show the agent tree of a session.
     Agents { session: String },
+    /// Install and operate plugins.
+    Plugin {
+        #[command(subcommand)]
+        cmd: plugin::PluginCmd,
+    },
+    /// List items that connectors brought in.
+    Items {
+        #[arg(long)]
+        source: Option<String>,
+        #[arg(long, default_value_t = 30)]
+        limit: u32,
+    },
     /// Forward a Claude Code hook payload (stdin) to the server.
     #[command(hide = true)]
     Hook,
@@ -401,6 +414,23 @@ async fn main() -> Result<()> {
             }
         }
         Cmd::Mcp => mcp::serve(client).await?,
+        Cmd::Plugin { cmd } => plugin::run(&client, cmd).await?,
+        Cmd::Items { source, limit } => {
+            let mut path = format!("/api/items?limit={limit}");
+            if let Some(s) = source {
+                path.push_str(&format!("&source={s}"));
+            }
+            for i in client.get(&path).await?.as_array().into_iter().flatten() {
+                println!(
+                    "{}\t{}\t{}\t{}\t{}",
+                    i["source"].as_str().unwrap_or(""),
+                    i["kind"].as_str().unwrap_or(""),
+                    i["state"].as_str().unwrap_or(""),
+                    i["title"].as_str().unwrap_or(""),
+                    i["url"].as_str().unwrap_or("")
+                );
+            }
+        }
         Cmd::Term { cmd } => match cmd {
             TermCmd::Read { session, json, scrollback } => {
                 let v = client.get(&format!("/api/sessions/{session}/screen?scrollback={scrollback}")).await?;

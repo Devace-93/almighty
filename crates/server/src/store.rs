@@ -1,4 +1,5 @@
 //! Persistent state: users, tokens, audit log. One SQLite file.
+//! Plugin and item tables live in `plugins::db`.
 
 use std::path::Path;
 use std::sync::Mutex;
@@ -88,7 +89,7 @@ pub struct AuditEntry {
 }
 
 pub struct Store {
-    conn: Mutex<Connection>,
+    pub(crate) conn: Mutex<Connection>,
 }
 
 const SCHEMA: &str = "
@@ -157,6 +158,7 @@ impl Store {
     fn init(conn: Connection) -> Result<Store> {
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
         conn.execute_batch(SCHEMA)?;
+        conn.execute_batch(crate::plugins::db::SCHEMA)?;
         // Terminal sessions do not survive a restart, so neither do their tokens.
         conn.execute("DELETE FROM tokens WHERE kind = 'agent'", [])?;
         Ok(Store { conn: Mutex::new(conn) })

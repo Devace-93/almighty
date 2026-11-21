@@ -212,7 +212,7 @@ Summary; the contract is [`PLUGINS.md`](PLUGINS.md).
    protocol, `almighty` CLI (`serve`, `attach`, `run`, `term`).
 2. **Terminals** (done except the tmux adapter, see docs/m2.md): sessions, multi-client attach, agent tree, control MCP
    tools with key encoding, human-priority lock, desktop client panel.
-3. **Plugin host**: WASM runtime, permissions, declarative panels, config
+3. **Plugin host** (done for light plugins, see docs/m3.md): WASM runtime, permissions, declarative panels, config
    files; first light plugin (GitHub connector).
 4. **Inbox + triage**: items, buckets, preferences, languages, corrections,
    notifications on desktop; Gmail/IMAP and Slack connectors.
@@ -240,7 +240,16 @@ Other machines sign in with `almighty login --name <you>` (set `ALMIGHTY_URL`).
 Accounts can also be created locally with `almighty user add <name> --role member`.
 Data lives in `ALMIGHTY_DATA` (default: the user data directory, `almighty/almighty.db`).
 
-Notes: [`docs/m2.md`](docs/m2.md) (terminal history, copy/paste, session tree),
+First plugin (needs `rustup target add wasm32-wasip2`):
+
+```bash
+(cd plugins/github && cargo build --release --target wasm32-wasip2)
+./target/debug/almighty plugin add plugins/github   # shows the permissions and asks
+# then list repositories in <data dir>/workspace.toml, see plugins/github/README.md
+```
+
+Notes: [`docs/m3.md`](docs/m3.md) (plugin host, GitHub connector),
+[`docs/m2.md`](docs/m2.md) (terminal history, copy/paste, session tree),
 [`docs/m1.md`](docs/m1.md) (accounts, tokens, permissions),
 [`docs/spikes/m0.md`](docs/spikes/m0.md) (spike findings).
 

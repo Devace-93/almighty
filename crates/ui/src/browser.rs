@@ -80,7 +80,7 @@ fn activate(url: &str, m: Modifiers, mut browser: Signal<Browser>) {
 }
 
 #[component]
-fn Link(url: String, label: String) -> Element {
+pub(crate) fn Link(url: String, label: String) -> Element {
     let browser = use_context::<Shell>().browser;
     if cfg!(target_arch = "wasm32") {
         // A real anchor, so Ctrl/Super+click and Alt+click keep their browser meaning.

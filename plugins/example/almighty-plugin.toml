@@ -1,0 +1,33 @@
+id = "net.ema.example"
+name = "example"
+version = "0.1.0"
+kind = "wasm"
+license = "MIT"
+
+[wasm]
+component = "target/wasm32-wasip2/release/almighty_example_plugin.wasm"
+
+[permissions]
+items = ["write"]
+network = ["127.0.0.1"]
+secrets = ["EXAMPLE_TOKEN"]
+
+[connector]
+poll_seconds = 0   # only on demand
+
+[[panels]]
+id = "counter"
+title = "Counter"
+type = "declarative"
+
+[[commands]]
+id = "example.fetch"
+title = "Fetch a URL"
+
+[[commands]]
+id = "example.items"
+title = "List items"
+
+[[commands]]
+id = "example.spin"
+title = "Never return (tests the time limit)"

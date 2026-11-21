@@ -1,0 +1,25 @@
+id = "net.ema.github"
+name = "github"
+version = "0.1.0"
+kind = "wasm"
+license = "MIT"
+
+[wasm]
+component = "target/wasm32-wasip2/release/almighty_github_plugin.wasm"
+
+[permissions]
+items = ["write"]
+network = ["api.github.com"]
+secrets = ["GITHUB_TOKEN"]
+
+[connector]
+poll_seconds = 300
+
+[[panels]]
+id = "pulls"
+title = "Pull requests"
+type = "declarative"
+
+[[commands]]
+id = "github.sync"
+title = "Sync pull requests now"

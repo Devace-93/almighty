@@ -8,6 +8,7 @@ mod account;
 mod browser;
 mod model;
 mod net;
+mod panel;
 #[cfg(all(feature = "desktop", target_os = "linux"))]
 mod sidebrowser;
 #[cfg(all(feature = "desktop", target_os = "windows"))]
@@ -44,9 +45,11 @@ const CELL_W: f64 = 7.83;
 const CELL_H: f64 = 17.0;
 
 #[derive(Clone, PartialEq)]
-enum View {
+pub(crate) enum View {
     Terminal(String),
     Agent(String, String),
+    /// A plugin panel: plugin id, panel id, title.
+    Panel(String, String, String),
 }
 
 #[derive(Clone, Copy)]
@@ -55,8 +58,10 @@ pub(crate) struct Shell {
     /// Token of the active workspace; sent with every request.
     pub(crate) token: Signal<String>,
     accounts: Signal<Accounts>,
-    view: Signal<Option<View>>,
+    pub(crate) view: Signal<Option<View>>,
     pub(crate) browser: Signal<Browser>,
+    /// Goes up when the server reports a change in plugins or items.
+    pub(crate) plugins_tick: Signal<u32>,
 }
 
 fn main() {
@@ -96,6 +101,25 @@ async fn api_post(server: &str, path: &str, body: Value) -> Option<Value> {
     res.json().await.ok()
 }
 
+/// Like `api_get`/`api_post`, but keeps the server's error message.
+pub(crate) async fn api_send(server: &str, method: &str, path: &str, body: Option<Value>) -> Result<Value, String> {
+    let token = TOKEN.peek().clone();
+    let client = reqwest::Client::new();
+    let mut req = if method == "POST" { client.post(format!("{server}{path}")) } else { client.get(format!("{server}{path}")) };
+    req = req.bearer_auth(token);
+    if let Some(body) = body {
+        req = req.json(&body);
+    }
+    let res = req.send().await.map_err(|_| "The server cannot be reached.".to_string())?;
+    let ok = res.status().is_success();
+    let value: Value = res.json().await.unwrap_or(Value::Null);
+    if ok {
+        Ok(value)
+    } else {
+        Err(value["error"].as_str().unwrap_or("The request failed.").to_string())
+    }
+}
+
 async fn api_delete(server: &str, path: &str) -> bool {
     let token = TOKEN.peek().clone();
     match reqwest::Client::new().delete(format!("{server}{path}")).bearer_auth(token).send().await {
@@ -128,6 +152,7 @@ fn App() -> Element {
         accounts,
         view: use_signal(|| None),
         browser: use_signal(Browser::default),
+        plugins_tick: use_signal(|| 0u32),
     };
     use_context_provider(|| shell);
 
@@ -175,6 +200,7 @@ fn Workbench(on_add: EventHandler<()>) -> Element {
                 match view() {
                     Some(View::Terminal(id)) => rsx! { TerminalView { key: "{id}", id } },
                     Some(View::Agent(sid, aid)) => rsx! { AgentView { key: "{sid}-{aid}", session: sid, agent: aid } },
+                    Some(View::Panel(plugin, panel, title)) => rsx! { panel::PanelView { key: "{plugin}/{panel}", plugin, panel, title } },
                     None => rsx! { div { class: "empty", "Pick a session, or start a new terminal." } },
                 }
             }
@@ -196,13 +222,33 @@ fn Sidebar(on_add: EventHandler<()>) -> Element {
     let mut sessions = use_signal(Vec::<SessionInfo>::new);
     let mut agents = use_signal(Vec::<AgentNode>::new);
     let mut online = use_signal(|| true);
+    let mut plugins_tick = shell.plugins_tick;
+    let mut panels = use_signal(Vec::<panel::PanelRef>::new);
+
+    // Panels of installed plugins, in the order of the user's layout file.
+    use_resource(move || async move {
+        let _ = plugins_tick();
+        let server = shell.server.peek().clone();
+        let plugins = api_get(&server, "/api/plugins").await.unwrap_or(Value::Null);
+        let layout = api_get(&server, "/api/layout").await.unwrap_or(Value::Null);
+        let list = panel::panel_list(&plugins, &layout);
+        if *panels.peek() != list {
+            panels.set(list);
+        }
+    });
 
     // The server pushes "something changed"; the lists are then refetched.
     use_future(move || async move {
         loop {
             let (_tx, mut rx) = futures_channel::mpsc::unbounded::<String>();
             let url = ws_url(&shell.server.peek(), "/api/events");
-            net::run_ws(url, &mut rx, move |_| refresh += 1).await;
+            net::run_ws(url, &mut rx, move |text| {
+                refresh += 1;
+                if text.contains("\"type\":\"plugin") || text.contains("\"type\":\"item\"") {
+                    plugins_tick += 1;
+                }
+            })
+            .await;
             net::sleep_ms(2000).await; // connection lost: retry
         }
     });
@@ -234,7 +280,7 @@ fn Sidebar(on_add: EventHandler<()>) -> Element {
             }
             let current = match &*view.peek() {
                 Some(View::Terminal(id)) | Some(View::Agent(id, _)) => Some(id.clone()),
-                None => None,
+                _ => None,
             };
             let list: Vec<AgentNode> = match current {
                 Some(id) => api_get(&server, &format!("/api/sessions/{id}/agents"))
@@ -279,7 +325,7 @@ fn Sidebar(on_add: EventHandler<()>) -> Element {
 
     let selected = match view() {
         Some(View::Terminal(id)) | Some(View::Agent(id, _)) => Some(id),
-        None => None,
+        _ => None,
     };
     let selected_agent = match view() {
         Some(View::Agent(_, a)) => Some(a),
@@ -314,6 +360,25 @@ fn Sidebar(on_add: EventHandler<()>) -> Element {
             button { class: "new", onclick: new_terminal, "+ New terminal" }
             if !online() {
                 p { class: "hint", "Server not reachable at {shell.server}" }
+            }
+            if !panels().is_empty() {
+                h2 { class: "section", "Panels" }
+                ul { class: "sessions",
+                    for p in panels() {
+                        li { key: "{p.plugin}/{p.panel}",
+                            button {
+                                class: if matches!(view(), Some(View::Panel(a, b, _)) if a == p.plugin && b == p.panel) { "row active" } else { "row" },
+                                onclick: {
+                                    let p = p.clone();
+                                    move |_| view.set(Some(View::Panel(p.plugin.clone(), p.panel.clone(), p.title.clone())))
+                                },
+                                span { class: "title", "{p.title}" }
+                                span { class: "kind", "{p.plugin_name}" }
+                            }
+                        }
+                    }
+                }
+                h2 { class: "section", "Terminals" }
             }
             ul { class: "sessions",
                 for (s, depth) in session_tree(&sessions()) {
