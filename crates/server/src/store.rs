@@ -180,6 +180,9 @@ impl Store {
     fn init(conn: Connection, secret_key: [u8; 32]) -> Result<Store> {
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
         conn.execute_batch(SCHEMA)?;
+        // Set for accounts that sign in through an identity provider.
+        let _ = conn.execute("ALTER TABLE users ADD COLUMN oidc_sub TEXT", []);
+        let _ = conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS users_oidc ON users(oidc_sub) WHERE oidc_sub IS NOT NULL", []);
         conn.execute_batch(crate::plugins::db::SCHEMA)?;
         // Columns added after the first plugin release; an error means they exist.
         for column in ["direct INTEGER NOT NULL DEFAULT 0", "mentions TEXT NOT NULL DEFAULT '[]'", "due INTEGER", "rev INTEGER NOT NULL DEFAULT 0"] {

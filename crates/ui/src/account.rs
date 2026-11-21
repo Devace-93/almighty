@@ -110,6 +110,55 @@ pub fn ConnectScreen(accounts: Signal<Accounts>, on_cancel: Option<EventHandler<
     let mut busy = use_signal(|| false);
     // None: not asked yet. Some(true): the server has no users.
     let mut setup_needed = use_signal(|| None::<bool>);
+    // The identity provider of the server, when it has one.
+    let mut sso = use_signal(|| None::<String>);
+
+    // Adds the workspace once the server handed over a session for a one-time code.
+    let finish_sso = move |target: String, code: String| async move {
+        match post(&target, "/api/auth/oidc/exchange", json!({ "code": code })).await {
+            Ok(v) => {
+                let ws_name = match reqwest::get(format!("{target}/api/workspace")).await {
+                    Ok(res) => res.json::<Value>().await.ok().and_then(|w| w["name"].as_str().map(str::to_string)),
+                    Err(_) => None,
+                };
+                let mut all = accounts.write();
+                all.add(Workspace {
+                    name: ws_name.unwrap_or_else(|| target.clone()),
+                    url: target,
+                    token: v["token"].as_str().unwrap_or_default().to_string(),
+                    user: v["name"].as_str().unwrap_or_default().to_string(),
+                    role: v["role"].as_str().unwrap_or("member").to_string(),
+                });
+                all.save();
+            }
+            Err(message) => error.set(Some(message)),
+        }
+        busy.set(false);
+    };
+    // The browser build comes back from the provider with a code in its address.
+    use_hook(move || {
+        if let Some((target, code)) = net::sso_returned() {
+            busy.set(true);
+            spawn(finish_sso(target, code));
+        }
+    });
+    let start_sso = move |_| async move {
+        if busy() {
+            return;
+        }
+        busy.set(true);
+        error.set(None);
+        let target = normalize_url(&url.peek());
+        match net::sso_code(&target).await {
+            Ok(code) => finish_sso(target, code).await,
+            Err(message) => {
+                if !message.is_empty() {
+                    error.set(Some(message));
+                }
+                busy.set(false);
+            }
+        }
+    };
 
     // Ask the server what it needs whenever the address changes.
     use_effect(move || {
@@ -120,6 +169,7 @@ pub fn ConnectScreen(accounts: Signal<Accounts>, on_cancel: Option<EventHandler<
                 Err(_) => None,
             };
             if normalize_url(&url.peek()) == target {
+                sso.set(info.as_ref().and_then(|v| v["sso"].as_str().map(str::to_string)));
                 setup_needed.set(info.map(|v| v["setup_needed"].as_bool().unwrap_or(false)));
             }
         });
@@ -190,6 +240,12 @@ pub fn ConnectScreen(accounts: Signal<Accounts>, on_cancel: Option<EventHandler<
                 }
                 if setup_needed().is_none() {
                     p { class: "hint", "No answer from that address yet." }
+                }
+                if let (Some(provider), true) = (sso(), net::HAS_SSO) {
+                    button { r#type: "button", class: "primary sso", disabled: busy(), onclick: start_sso,
+                        "Sign in with your organization"
+                    }
+                    p { class: "hint", "Through {provider}. Or use a local account below." }
                 }
                 if first_run {
                     label { "Setup code"

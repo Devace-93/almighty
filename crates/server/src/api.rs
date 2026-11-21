@@ -43,6 +43,12 @@ pub struct Config {
     pub data_dir: PathBuf,
 }
 
+/// Directory with the built web client, served at `/` when set
+/// (`ALMIGHTY_WEB_DIR`). Without it the server only speaks the API.
+pub fn web_dir() -> Option<PathBuf> {
+    std::env::var_os("ALMIGHTY_WEB_DIR").map(PathBuf::from).filter(|d| d.join("index.html").is_file())
+}
+
 impl Config {
     pub fn from_env() -> Self {
         let addr = std::env::var("ALMIGHTY_ADDR")
@@ -71,6 +77,7 @@ pub struct AppState {
     pub plugins: Arc<Plugins>,
     pub triage: crate::triage::Triage,
     pub signer: crate::service::Signer,
+    pub oidc: crate::oidc::Oidc,
     /// Needed to create the first owner over the API; printed at start-up.
     pub setup_code: String,
     sessions: RwLock<HashMap<String, Arc<Session>>>,
@@ -182,6 +189,7 @@ pub fn build(config: Config, store: Store) -> (Router, App) {
         plugins,
         triage,
         signer,
+        oidc: crate::oidc::Oidc::default(),
         setup_code: code.iter().map(|b| format!("{b:02x}")).collect(),
         sessions: RwLock::new(HashMap::new()),
         next_id: AtomicU64::new(1),
@@ -199,6 +207,11 @@ pub fn build(config: Config, store: Store) -> (Router, App) {
         .route("/api/workspace", get(workspace))
         .route("/api/setup", post(setup))
         .route("/api/auth/login", post(login))
+        .route("/api/auth/oidc/start", get(oidc_start))
+        .route("/api/auth/oidc/callback", get(oidc_callback))
+        .route("/api/auth/oidc/exchange", post(oidc_exchange))
+        .route("/api/users/{name}/role", post(set_user_role))
+        .route("/api/users/{name}", delete(delete_user))
         .route("/api/auth/me", get(me))
         .route("/api/auth/logout", post(logout))
         .route("/api/tokens", get(list_tokens).post(create_token))
@@ -245,9 +258,19 @@ pub fn build(config: Config, store: Store) -> (Router, App) {
         .route("/api/inbox/counts", get(inbox_counts))
         .route("/api/inbox/preferences", get(inbox_preferences))
         .route("/api/inbox/{id}", post(inbox_change))
+        // An unknown API path is an error, never the web client's page.
+        .route("/api/{*rest}", axum::routing::any(|| async { ApiError(StatusCode::NOT_FOUND, "no such API path".into()) }))
         .layer(middleware::from_fn_with_state(app.clone(), auth))
         .layer(tower_http::cors::CorsLayer::permissive())
         .with_state(app.clone());
+    // Unknown paths fall through to the web client (a single-page app), when one is configured.
+    let router = match web_dir() {
+        Some(dir) => {
+            let index = dir.join("index.html");
+            router.fallback_service(tower_http::services::ServeDir::new(dir).fallback(tower_http::services::ServeFile::new(index)))
+        }
+        None => router,
+    };
     (router, app)
 }
 
@@ -275,11 +298,23 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     Ok(())
 }
 
-const PUBLIC: &[&str] = &["/api/health", "/api/workspace", "/api/setup", "/api/auth/login", "/.well-known/jwks.json"];
+const PUBLIC: &[&str] = &[
+    "/api/health",
+    "/api/workspace",
+    "/api/setup",
+    "/api/auth/login",
+    "/api/auth/oidc/start",
+    "/api/auth/oidc/callback",
+    "/api/auth/oidc/exchange",
+    "/.well-known/jwks.json",
+];
 
 async fn auth(State(app): State<App>, mut req: Request, next: Next) -> Response {
     // Hooks authenticate with a signature over the body, checked in the handler.
-    if req.method() == Method::OPTIONS || PUBLIC.contains(&req.uri().path()) || req.uri().path().starts_with("/hooks/") {
+    let path = req.uri().path();
+    // The web client's files are public; everything under /api/ and the listed paths is not.
+    let is_api = path.starts_with("/api/") || path.starts_with("/hooks/") || path.starts_with("/.well-known/");
+    if req.method() == Method::OPTIONS || PUBLIC.contains(&path) || path.starts_with("/hooks/") || !is_api {
         return next.run(req).await;
     }
     let bearer = req
@@ -311,6 +346,8 @@ async fn workspace(State(app): State<App>) -> Json<Value> {
         "name": app.store.workspace_name(),
         "setup_needed": app.store.user_count() == 0,
         "version": env!("CARGO_PKG_VERSION"),
+        // Whether "sign in with your organization" is available, and through whom.
+        "sso": crate::oidc::Config::load(&app.config.data_dir).map(|c| c.issuer),
     }))
 }
 
@@ -390,6 +427,98 @@ async fn login(State(app): State<App>, Json(req): Json<LoginReq>) -> ApiResult {
     };
     app.store.audit(&format!("user:{}", req.name), None, "login", &device);
     Ok(Json(json!({ "token": token, "name": req.name, "role": role })))
+}
+
+// ---- sign-in through an identity provider ----
+
+fn oidc_config(app: &App) -> Result<crate::oidc::Config, ApiError> {
+    crate::oidc::Config::load(&app.config.data_dir)
+        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "this workspace has no identity provider configured".into()))
+}
+
+/// Sends the browser to the provider. `redirect` is where the client wants
+/// to be sent back with a one-time code.
+async fn oidc_start(State(app): State<App>, Query(q): Query<HashMap<String, String>>) -> Result<Response, ApiError> {
+    let config = oidc_config(&app)?;
+    let redirect = q.get("redirect").cloned().unwrap_or_default();
+    let device = q.get("device").cloned().unwrap_or_else(|| "client".into());
+    let (app2, url) = (app.clone(), app.config.url());
+    let target = tokio::task::spawn_blocking(move || app2.oidc.start(&config, &url, &redirect, &device))
+        .await
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(bad)?;
+    Ok(axum::response::Redirect::to(&target).into_response())
+}
+
+/// The provider sends the browser back here.
+async fn oidc_callback(State(app): State<App>, Query(q): Query<HashMap<String, String>>) -> Result<Response, ApiError> {
+    let config = oidc_config(&app)?;
+    if let Some(error) = q.get("error") {
+        let detail: String = q.get("error_description").unwrap_or(error).chars().filter(|c| !c.is_control()).take(200).collect();
+        return Err(forbidden(format!("the identity provider refused the sign-in: {detail}")));
+    }
+    let (Some(state), Some(code)) = (q.get("state").cloned(), q.get("code").cloned()) else {
+        return Err(bad("missing code or state"));
+    };
+    let (app2, url, config2) = (app.clone(), app.config.url(), config.clone());
+    let (identity, redirect, device) = tokio::task::spawn_blocking(move || app2.oidc.finish(&config2, &url, &state, &code))
+        .await
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(forbidden)?;
+    let user = app.store.oidc_user(&config, &identity).map_err(forbidden)?;
+    let (_, token) = app.store.create_user_token(user, "login", &device, Some(LOGIN_TTL)).map_err(|e| bad(e.to_string()))?;
+    app.store.audit(&format!("user:{}", identity.email), None, "login.sso", &device);
+    // The session token never travels in a URL: the client trades this code for it.
+    let code = app.oidc.hand_over(token);
+    let separator = if redirect.contains('?') { '&' } else { '?' };
+    Ok(axum::response::Redirect::to(&format!("{redirect}{separator}almighty_code={code}")).into_response())
+}
+
+#[derive(Deserialize)]
+struct ExchangeReq {
+    code: String,
+}
+
+async fn oidc_exchange(State(app): State<App>, Json(req): Json<ExchangeReq>) -> ApiResult {
+    let token = app.oidc.redeem(&req.code).ok_or_else(|| ApiError(StatusCode::UNAUTHORIZED, "this sign-in code is not valid any more".into()))?;
+    match app.store.principal_for(&token) {
+        Some(Principal::User { name, role, .. }) => Ok(Json(json!({ "token": token, "name": name, "role": role.as_str() }))),
+        _ => Err(ApiError(StatusCode::UNAUTHORIZED, "this sign-in code is not valid any more".into())),
+    }
+}
+
+#[derive(Deserialize)]
+struct RoleReq {
+    role: Role,
+}
+
+/// Admins manage members and guests; only owners touch admins and owners.
+fn may_manage(who: &Principal, target: Option<Role>, new_role: Option<Role>) -> Result<String, ApiError> {
+    let (_, name) = need_role(who, Role::Admin)?;
+    let highest = target.into_iter().chain(new_role).max().unwrap_or(Role::Guest);
+    if highest >= Role::Admin {
+        need_role(who, Role::Owner)?;
+    }
+    Ok(name.to_string())
+}
+
+async fn set_user_role(State(app): State<App>, Extension(who): Who, Path(name): Path<String>, Json(req): Json<RoleReq>) -> ApiResult {
+    let target = app.store.role_of(&name).ok_or_else(|| ApiError(StatusCode::NOT_FOUND, format!("no user {name}")))?;
+    let by = may_manage(&who, Some(target), Some(req.role))?;
+    app.store.set_role(&name, req.role).map_err(bad)?;
+    app.store.audit(&format!("user:{by}"), None, "user.role", &format!("{name}: {} -> {}", target.as_str(), req.role.as_str()));
+    Ok(Json(json!({ "name": name, "role": req.role })))
+}
+
+async fn delete_user(State(app): State<App>, Extension(who): Who, Path(name): Path<String>) -> ApiResult {
+    let target = app.store.role_of(&name).ok_or_else(|| ApiError(StatusCode::NOT_FOUND, format!("no user {name}")))?;
+    let by = may_manage(&who, Some(target), None)?;
+    if by.eq_ignore_ascii_case(&name) {
+        return Err(bad("you cannot remove your own account"));
+    }
+    app.store.delete_user(&name).map_err(bad)?;
+    app.store.audit(&format!("user:{by}"), None, "user.delete", &name);
+    Ok(Json(json!({ "ok": true })))
 }
 
 async fn me(State(app): State<App>, Extension(who): Who) -> Json<Value> {

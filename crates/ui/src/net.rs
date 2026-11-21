@@ -59,9 +59,13 @@ pub async fn run_ws(url: String, outgoing: &mut UnboundedReceiver<String>, mut o
 pub fn default_server() -> String {
     #[cfg(target_arch = "wasm32")]
     {
-        if let Some(host) = web_sys::window().and_then(|w| w.location().hostname().ok()) {
-            if !host.is_empty() {
-                return format!("http://{host}:8092");
+        if let Some(location) = web_sys::window().map(|w| w.location()) {
+            // Served by the server itself: same origin. Served by `dx` while developing: the server is on 8092.
+            let dev = location.port().is_ok_and(|p| p == "8093");
+            match (dev, location.origin(), location.hostname()) {
+                (false, Ok(origin), _) if origin.starts_with("http") => return origin,
+                (_, _, Ok(host)) if !host.is_empty() => return format!("http://{host}:8092"),
+                _ => {}
             }
         }
     }
@@ -232,4 +236,86 @@ pub fn notify(title: &str, body: &str) {
     {
         let _ = (title, body);
     }
+}
+
+/// Whether this build can sign in through an identity provider.
+pub const HAS_SSO: bool = cfg!(any(target_arch = "wasm32", target_os = "linux", target_os = "macos", target_os = "windows"));
+
+/// Browser: leaves the page for the provider; the server sends the browser
+/// back to this page with a one-time code (see `sso_returned`).
+#[cfg(target_arch = "wasm32")]
+pub async fn sso_code(server: &str) -> Result<String, String> {
+    let window = web_sys::window().ok_or("no window")?;
+    let location = window.location();
+    let here = format!("{}{}", location.origin().unwrap_or_default(), location.pathname().unwrap_or_default());
+    if let Ok(Some(storage)) = window.session_storage() {
+        let _ = storage.set_item("almighty-sso-server", server);
+    }
+    location
+        .set_href(&format!("{server}/api/auth/oidc/start?device=web&redirect={}", String::from(js_sys::encode_uri_component(&here))))
+        .map_err(|_| "cannot leave the page".to_string())?;
+    // The page is going away; the sign-in continues when it comes back.
+    Err(String::new())
+}
+
+/// Browser: the server and one-time code of a sign-in that just came back,
+/// removed from the address bar.
+#[cfg(target_arch = "wasm32")]
+pub fn sso_returned() -> Option<(String, String)> {
+    let window = web_sys::window()?;
+    let location = window.location();
+    let search = location.search().ok()?;
+    let code = search.trim_start_matches('?').split('&').find_map(|kv| kv.strip_prefix("almighty_code="))?.to_string();
+    let storage = window.session_storage().ok()??;
+    let server = storage.get_item("almighty-sso-server").ok()??;
+    let _ = storage.remove_item("almighty-sso-server");
+    if let (Ok(history), Ok(path)) = (window.history(), location.pathname()) {
+        let _ = history.replace_state_with_url(&js_sys::wasm_bindgen::JsValue::NULL, "", Some(&path));
+    }
+    Some((server, code))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn sso_returned() -> Option<(String, String)> {
+    None
+}
+
+/// Desktop: opens the system browser for the provider and waits on a
+/// loopback port for the server to send the one-time code back.
+#[cfg(all(not(target_arch = "wasm32"), any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+pub async fn sso_code(server: &str) -> Result<String, String> {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
+    let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+    listener.set_nonblocking(true).map_err(|e| e.to_string())?;
+    crate::open_external(&format!("{server}/api/auth/oidc/start?device=desktop&redirect=http://127.0.0.1:{port}/"));
+    // Five minutes to finish at the provider.
+    for _ in 0..1500 {
+        match listener.accept() {
+            Ok((mut stream, _)) => {
+                let _ = stream.set_nonblocking(false);
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..n]).to_string();
+                let code = request
+                    .split_whitespace()
+                    .nth(1)
+                    .and_then(|path| path.split(['?', '&']).find_map(|kv| kv.strip_prefix("almighty_code=")))
+                    .map(str::to_string);
+                let page = "<!doctype html><meta charset=utf-8><title>almighty</title><p style=\"font:16px system-ui;padding:24px\">Signed in. You can close this tab and go back to almighty.</p>";
+                let _ = stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{page}", page.len()).as_bytes());
+                if let Some(code) = code {
+                    return Ok(code);
+                }
+                // A browser asking for a favicon, or a stray request: keep waiting.
+            }
+            Err(_) => sleep_ms(200).await,
+        }
+    }
+    Err("The sign-in was not finished in time.".into())
+}
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+pub async fn sso_code(_server: &str) -> Result<String, String> {
+    Err("Sign-in through an identity provider is not available on this device yet.".into())
 }

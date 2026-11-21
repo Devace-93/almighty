@@ -42,8 +42,12 @@ enum Cmd {
     },
     /// Sign in and remember the token for this server.
     Login {
-        #[arg(long)]
-        name: String,
+        /// Account name, for a local account with a password.
+        #[arg(long, required_unless_present = "sso")]
+        name: Option<String>,
+        /// Sign in through the workspace's identity provider, in your browser.
+        #[arg(long, conflicts_with = "name")]
+        sso: bool,
     },
     /// Forget the saved token for this server and revoke it.
     Logout,
@@ -177,6 +181,10 @@ enum UserCmd {
         role: String,
     },
     List,
+    /// Change a person's role through the server (owner, admin, member, guest).
+    Role { name: String, role: String },
+    /// Remove a person through the server; their tokens stop working.
+    Remove { name: String },
 }
 
 #[derive(Subcommand)]
@@ -304,6 +312,37 @@ fn is_claude(command: &[String]) -> bool {
     std::path::Path::new(&command[0]).file_stem().is_some_and(|n| n.eq_ignore_ascii_case("claude"))
 }
 
+/// Waits on a loopback port for the server to send the browser back with a
+/// one-time code, after the person signs in at the identity provider.
+async fn sso_code(url: &str) -> Result<String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let port = listener.local_addr()?.port();
+    let start = format!("{url}/api/auth/oidc/start?device=cli&redirect=http://127.0.0.1:{port}/");
+    eprintln!("Open this address in your browser to sign in:\n{start}");
+    let wait = async {
+        loop {
+            let (mut stream, _) = listener.accept().await?;
+            let mut buf = [0u8; 4096];
+            let n = stream.read(&mut buf).await.unwrap_or(0);
+            let request = String::from_utf8_lossy(&buf[..n]).to_string();
+            let code = request
+                .split_whitespace()
+                .nth(1)
+                .and_then(|path| path.split(['?', '&']).find_map(|kv| kv.strip_prefix("almighty_code=")))
+                .map(str::to_string);
+            let page = "Signed in. You can close this tab and go back to the terminal.";
+            let _ = stream
+                .write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{page}", page.len()).as_bytes())
+                .await;
+            if let Some(code) = code {
+                return anyhow::Ok(code);
+            }
+        }
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(300), wait).await.context("the sign-in was not finished in five minutes")?
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // `almighty inbox | head` should end quietly, not with a broken-pipe panic.
@@ -325,7 +364,14 @@ async fn main() -> Result<()> {
             creds::save(&url, v["token"].as_str().context("no token in the reply")?)?;
             println!("Owner {name} created; signed in to {url}");
         }
-        Cmd::Login { name } => {
+        Cmd::Login { sso: true, .. } => {
+            let code = sso_code(&url).await?;
+            let v = client.post("/api/auth/oidc/exchange", json!({ "code": code })).await?;
+            creds::save(&url, v["token"].as_str().context("no token in the reply")?)?;
+            println!("Signed in to {url} as {} ({})", v["name"].as_str().unwrap_or("?"), v["role"].as_str().unwrap_or("?"));
+        }
+        Cmd::Login { name, .. } => {
+            let name = name.context("--name is required")?;
             let password = read_password(false)?;
             let device = format!("cli on {}", std::env::var("HOSTNAME").or_else(|_| std::env::var("COMPUTERNAME")).unwrap_or_else(|_| "this machine".into()));
             let v = client.post("/api/auth/login", json!({ "name": name, "password": password, "device": device })).await?;
@@ -344,6 +390,14 @@ async fn main() -> Result<()> {
                 _ => println!("{} ({}) in workspace {}", v["name"].as_str().unwrap_or("?"), v["role"].as_str().unwrap_or("?"), v["workspace"].as_str().unwrap_or("?")),
             }
         }
+        Cmd::User { cmd: UserCmd::Role { name, role } } => {
+            let v = client.post(&format!("/api/users/{name}/role"), json!({ "role": role })).await?;
+            println!("{name} is now {}", v["role"].as_str().unwrap_or(&role));
+        }
+        Cmd::User { cmd: UserCmd::Remove { name } } => {
+            client.call(reqwest::Method::DELETE, &format!("/api/users/{name}"), None).await?;
+            println!("{name} removed");
+        }
         Cmd::User { cmd } => {
             use almighty_server::store::{Role, Store};
             let store = Store::open(&almighty_server::Config::from_env().db_path())?;
@@ -359,6 +413,7 @@ async fn main() -> Result<()> {
                         println!("{}\t{}\t{}", u.id, u.role.as_str(), u.name);
                     }
                 }
+                UserCmd::Role { .. } | UserCmd::Remove { .. } => unreachable!("handled above"),
             }
         }
         Cmd::Token { cmd } => match cmd {

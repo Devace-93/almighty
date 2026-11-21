@@ -514,3 +514,4 @@ span.link { cursor: pointer; text-decoration: underline; }
 }
 .push-form .p-input { flex: 1; min-width: 200px; }
 .push-form input { width: 100%; }
+.connect-card .sso { width: 100%; }
