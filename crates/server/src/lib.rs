@@ -11,6 +11,7 @@ pub mod review;
 pub mod service;
 pub mod session;
 pub mod store;
+pub mod tmux;
 pub mod triage;
 
 pub use api::{build, serve, App, AppState, Config};

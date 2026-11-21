@@ -533,3 +533,7 @@ span.link { cursor: pointer; text-decoration: underline; }
 .grants-row .title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .grants-row select { padding: 4px 6px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: inherit; }
 @media (max-width: 720px) { .grants-row select { min-height: 40px; } }
+
+/* tmux windows that can be opened as sessions */
+.from-tmux { margin: 0 12px 8px; }
+.tmux-list { margin: 0 0 8px; border-bottom: 1px solid var(--line); }

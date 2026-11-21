@@ -14,6 +14,7 @@ mod panel;
 mod planner;
 mod review;
 mod settings;
+mod tmux;
 #[cfg(all(feature = "desktop", target_os = "linux"))]
 mod sidebrowser;
 #[cfg(all(feature = "desktop", target_os = "windows"))]
@@ -255,6 +256,8 @@ fn Sidebar(on_add: EventHandler<()>) -> Element {
     let mut refresh = use_signal(|| 0u32);
     // Session whose close button was pressed and is waiting for an answer.
     let mut closing = use_signal(|| None::<String>);
+    // The list of tmux windows that can be opened is showing.
+    let mut tmux_open = use_signal(|| false);
     let mut view = shell.view;
     let mut sessions = use_signal(Vec::<SessionInfo>::new);
     let mut agents = use_signal(Vec::<AgentNode>::new);
@@ -427,6 +430,18 @@ fn Sidebar(on_add: EventHandler<()>) -> Element {
                 }
             }
             button { class: "new", onclick: new_terminal, "+ New terminal" }
+            if inbox_counts() != Value::Null {
+                button {
+                    class: if tmux_open() { "toggle on from-tmux" } else { "toggle from-tmux" },
+                    title: "Open a window of the tmux server on the server's machine",
+                    aria_expanded: tmux_open(),
+                    onclick: move |_| tmux_open.set(!tmux_open()),
+                    "Open a tmux window"
+                }
+            }
+            if tmux_open() {
+                tmux::TmuxWindows { on_done: move |_| { tmux_open.set(false); refresh += 1; } }
+            }
             if !online() {
                 p { class: "hint", "Server not reachable at {shell.server}" }
             }

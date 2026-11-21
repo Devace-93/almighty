@@ -123,8 +123,10 @@ client disconnects (tmux-like). Any number of clients attach to one session.
   (raw byte stream; the app's panel is just another attached client).
 - `almighty run -- claude` started in your own terminal registers the session
   with the server, so it shows up in the app and on mobile.
-- tmux adapter: existing tmux panes are discovered through control mode and
-  exposed as sessions without restarting them.
+- tmux adapter: windows of the tmux server on the server's machine are listed
+  and opened as sessions without restarting them (`almighty tmux`, or "Open a
+  tmux window" in the app). Each one is a tmux client inside a session; a
+  control-mode adapter with one session per pane is not built.
 
 Rich mode (inline media, link handling, explainer) exists only in the app
 clients; a plain terminal gets the plain stream.
@@ -210,7 +212,7 @@ Summary; the contract is [`PLUGINS.md`](PLUGINS.md).
    terminal; Claude Code subagent tree from hooks.
 1. **Server skeleton** (done, see docs/m1.md): workspaces, local auth, tokens, SQLite, WebSocket
    protocol, `almighty` CLI (`serve`, `attach`, `run`, `term`).
-2. **Terminals** (done except the tmux adapter, see docs/m2.md): sessions, multi-client attach, agent tree, control MCP
+2. **Terminals** (done, see docs/m2.md): sessions, multi-client attach, agent tree, control MCP
    tools with key encoding, human-priority lock, desktop client panel.
 3. **Plugin host** (done for light plugins, see docs/m3.md): WASM runtime, permissions, declarative panels, config
    files; first light plugin (GitHub connector).

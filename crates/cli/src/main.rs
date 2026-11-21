@@ -104,6 +104,11 @@ enum Cmd {
     },
     /// Show the agent tree of a session.
     Agents { session: String },
+    /// List the windows of the tmux server next to almighty, or open one as a session.
+    Tmux {
+        /// The window to open, as `session:window` (e.g. `work:2`). Without it, lists the windows.
+        target: Option<String>,
+    },
     /// Install and operate plugins.
     Plugin {
         #[command(subcommand)]
@@ -572,6 +577,30 @@ async fn main() -> Result<()> {
             }
         }
         Cmd::Mcp => mcp::serve(client).await?,
+        Cmd::Tmux { target: None } => {
+            let v = client.get("/api/tmux").await?;
+            if v["available"] == false {
+                anyhow::bail!("{}", v["reason"].as_str().unwrap_or("tmux is not available"));
+            }
+            for w in v["windows"].as_array().into_iter().flatten() {
+                println!(
+                    "{}:{}\t{}\t{}\t{}",
+                    w["session"].as_str().unwrap_or(""),
+                    w["index"],
+                    w["name"].as_str().unwrap_or(""),
+                    w["command"].as_str().unwrap_or(""),
+                    w["path"].as_str().unwrap_or("")
+                );
+            }
+        }
+        Cmd::Tmux { target: Some(target) } => {
+            let (session, window) = target
+                .rsplit_once(':')
+                .and_then(|(s, w)| Some((s, w.parse::<u32>().ok()?)))
+                .ok_or_else(|| anyhow::anyhow!("write the window as session:window, e.g. work:2"))?;
+            let v = client.post("/api/tmux/adopt", json!({ "session": session, "window": window })).await?;
+            println!("{}\t{}", v["id"].as_str().unwrap_or(""), v["title"].as_str().unwrap_or(""));
+        }
         Cmd::Acp { prompt, permissions, command } => acp::run(client, command, prompt, permissions).await?,
         Cmd::AcpEchoAgent => acp::echo_agent().await?,
         Cmd::Plugin { cmd } => plugin::run(&client, cmd).await?,

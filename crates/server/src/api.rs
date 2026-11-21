@@ -221,6 +221,8 @@ pub fn build(config: Config, store: Store) -> (Router, App) {
         .route("/api/events", get(events_ws))
         .route("/api/sessions", get(list_sessions).post(create_session))
         .route("/api/sessions/{id}", get(get_session).delete(close_session))
+        .route("/api/tmux", get(tmux_list))
+        .route("/api/tmux/adopt", post(tmux_adopt))
         .route("/api/sessions/{id}/screen", get(screen))
         .route("/api/sessions/{id}/input", post(input))
         .route("/api/sessions/{id}/wait", post(wait))
@@ -668,9 +670,13 @@ async fn list_sessions(State(app): State<App>, Extension(who): Who, Query(q): Qu
 }
 
 async fn create_session(State(app): State<App>, Extension(who): Who, Json(req): Json<CreateSession>) -> ApiResult {
-    let created_by = match &who {
+    start_session(&app, &who, req)
+}
+
+fn start_session(app: &App, who: &Principal, req: CreateSession) -> ApiResult {
+    let created_by = match who {
         Principal::User { name, .. } => {
-            need_role(&who, Role::Member)?;
+            need_role(who, Role::Member)?;
             Creator::User(name.clone())
         }
         Principal::Agent { session, .. } => Creator::Agent(session.clone()),
@@ -693,6 +699,48 @@ async fn create_session(State(app): State<App>, Extension(who): Who, Json(req): 
     app.sessions.write().unwrap().insert(id, session);
     app.emit(json!({ "type": "sessions" }));
     Ok(Json(json!(info)))
+}
+
+/// Windows of the tmux server on this machine that can be opened as sessions.
+async fn tmux_list(Extension(who): Who) -> ApiResult {
+    need_role(&who, Role::Member)?;
+    let windows = tokio::task::spawn_blocking(crate::tmux::list).await.map_err(|e| bad(e.to_string()))?;
+    Ok(Json(match windows {
+        Ok(windows) => json!({ "available": true, "windows": windows }),
+        Err(reason) => json!({ "available": false, "reason": reason, "windows": [] }),
+    }))
+}
+
+#[derive(Deserialize)]
+struct AdoptReq {
+    /// tmux's id of the session (`$3`) or its name.
+    session: String,
+    window: u32,
+    #[serde(default)]
+    cols: Option<u16>,
+    #[serde(default)]
+    rows: Option<u16>,
+}
+
+/// Opens one tmux window as a session. Nothing in the window is restarted.
+async fn tmux_adopt(State(app): State<App>, Extension(who): Who, Json(req): Json<AdoptReq>) -> ApiResult {
+    need_role(&who, Role::Member)?;
+    let windows = tokio::task::spawn_blocking(crate::tmux::list).await.map_err(|e| bad(e.to_string()))?.map_err(bad)?;
+    // Only a window tmux itself listed: the target never comes from the caller's text.
+    let window = windows
+        .iter()
+        .find(|w| (w.session_id == req.session || w.session == req.session) && w.index == req.window)
+        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, format!("no tmux window {}:{}", req.session, req.window)))?;
+    let unique: String = rand::random::<[u8; 4]>().iter().map(|b| format!("{b:02x}")).collect();
+    let create = CreateSession {
+        command: crate::tmux::adopt_command(window, &unique),
+        cwd: None,
+        env: HashMap::new(),
+        cols: req.cols,
+        rows: req.rows,
+        title: Some(crate::tmux::title(window)),
+    };
+    start_session(&app, &who, create)
 }
 
 async fn get_session(State(app): State<App>, Extension(who): Who, Path(id): Path<String>) -> ApiResult {
